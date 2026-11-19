@@ -4,10 +4,14 @@
  * Each animation frame: measure real elapsed time, advance the simulation,
  * update debug mode, then draw from whichever camera is active.
  */
-import { BALL_RADIUS, TABLE_TOP_Y } from './game/constants.ts';
+import { launchBall, stepBall, type BallState } from './game/ball.ts';
+import { BALL_RADIUS, TABLE_TOP_Y, TIME_SCALE } from './game/constants.ts';
+import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { knobs } from './game/knobs.ts';
+import { createSimClock } from './game/simClock.ts';
+import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { createDebugMode } from './render/debugMode.ts';
-import { createTableScene, type Vec3Like } from './render/scene.ts';
+import { createTableScene } from './render/scene.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
 if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
@@ -16,8 +20,14 @@ const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
 knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
 
-/** Ball physics centre: at rest on the player's half until ball physics lands. */
-const ballPosition: Vec3Like = { x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 };
+/** The one ball in play: at rest on the player's half until something launches it. */
+let ball: BallState = launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 }, { x: 0, y: 0, z: 0 });
+const simClock = createSimClock();
+const ballStatus = createBallStatusReadout();
+
+knobs.button({ name: 'Drop ball (30 cm)', group: 'Ball', onPress: () => (ball = DEBUG_THROWS.drop()) });
+knobs.button({ name: 'Throw into net', group: 'Ball', onPress: () => (ball = DEBUG_THROWS.intoNet()) });
+knobs.button({ name: 'Throw off table', group: 'Ball', onPress: () => (ball = DEBUG_THROWS.offTable()) });
 
 function resize(): void {
   const width = window.innerWidth;
@@ -34,12 +44,14 @@ function frame(now: number): void {
   const elapsedSeconds = (now - lastFrameTime) / 1000;
   lastFrameTime = now;
 
-  // Simulation slot (next ticket): fixed-step accumulator. Add
-  // Math.min(elapsedSeconds, MAX_FRAME_DT) * TIME_SCALE.value to an
-  // accumulator and step the ball in PHYSICS_DT chunks while it holds enough.
+  // Fixed 240 Hz substeps, slowed by TIME_SCALE. Ball events (bounces for the
+  // sound, net and out for the rally) are returned by stepBall for later tickets.
+  const steps = simClock.advance(elapsedSeconds, TIME_SCALE.value);
+  for (let i = 0; i < steps; i++) ball = stepBall(ball).state;
 
   debug.update(elapsedSeconds);
-  tableScene.syncBall(ballPosition);
+  ballStatus.update(ball, debug.active);
+  tableScene.syncBall(ball.position);
   tableScene.render(debug.camera);
 }
 
