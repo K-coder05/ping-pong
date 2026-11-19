@@ -6,6 +6,7 @@
  */
 import { BALL_RADIUS, TABLE_TOP_Y } from './game/constants.ts';
 import { knobs } from './game/knobs.ts';
+import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode } from './render/debugMode.ts';
 import { createTableScene, type Vec3Like } from './render/scene.ts';
 
@@ -15,6 +16,7 @@ if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
 const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
 knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
+installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
 
 /** Ball physics centre: at rest on the player's half until ball physics lands. */
 const ballPosition: Vec3Like = { x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 };
