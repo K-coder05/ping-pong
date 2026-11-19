@@ -106,6 +106,8 @@ export const DIRECTION_SPREAD_M = knobs.number({ name: 'DIRECTION_SPREAD_M', min
 export const ONE_EURO_MIN_CUTOFF = knobs.number({ name: 'ONE_EURO_MIN_CUTOFF', min: 0.1, max: 5, step: 0.1, default: 1, group: 'Smoothing' });
 /** One Euro filter speed coefficient. */
 export const ONE_EURO_BETA = knobs.number({ name: 'ONE_EURO_BETA', min: 0, max: 0.1, step: 0.001, default: 0.01, group: 'Smoothing' });
+/** Hitting-wrist visibility below which the wrist counts as lost (tracking-loss banner). */
+export const TRACKING_MIN_VISIBILITY = 0.5;
 
 /** Ball drawn this many times its physics radius, so it's readable from 2 m. */
 export const BALL_DRAW_SCALE = knobs.number({ name: 'BALL_DRAW_SCALE', min: 1, max: 4, step: 0.1, default: 2, group: 'Render' });

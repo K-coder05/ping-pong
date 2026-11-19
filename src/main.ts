@@ -10,6 +10,7 @@ import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { knobs } from './game/knobs.ts';
 import { createSimClock } from './game/simClock.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
+import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode } from './render/debugMode.ts';
 import { createTableScene } from './render/scene.ts';
 
@@ -19,6 +20,7 @@ if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
 const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
 knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
+installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
 
 /** The one ball in play: at rest on the player's half until something launches it. */
 let ball: BallState = launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 }, { x: 0, y: 0, z: 0 });
