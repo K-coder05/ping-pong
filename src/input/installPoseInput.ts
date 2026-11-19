@@ -1,5 +1,6 @@
 import { handedness } from '../game/handedness.ts';
 import type { KnobRegistry } from '../game/knobs.ts';
+import type { Hand } from '../sensing/landmarks.ts';
 import { addOverlayExtension } from '../render/cameraOverlay.ts';
 import { askHandedness } from '../render/handednessPrompt.ts';
 import { createSwingOverlay } from '../render/swingOverlay.ts';
@@ -36,19 +37,29 @@ export function startCamera(): Promise<void> {
   return sharedSensing().then(() => undefined);
 }
 
+export interface PoseInputOptions {
+  /**
+   * The hitting hand, once known. Called when sensing starts. Play waits for
+   * onboarding's "Which hand holds the paddle?" step; default: the saved
+   * hand, or ask right away.
+   */
+  hand?: () => Promise<Hand>;
+}
+
 /**
  * Adds pose input to the game page. Once the page's shared sensing starts
- * (`startCamera`, or the debug overlay), it asks "Which hand holds the
- * paddle?" if no hand is saved, then turns frames into Swings, tracks the
- * hitting wrist for the Paddle and tracking loss, and adds the stroke-speed
- * bar, Onset flash and CSV columns to the camera overlay. The debug panel's
- * Swing group gets an "Ask handedness" button to change hands.
+ * (`startCamera`, or the debug overlay) and the hitting hand is known
+ * (`options.hand`), it turns frames into Swings, tracks the hitting wrist for
+ * the Paddle and tracking loss, and adds the stroke-speed bar, Onset flash
+ * and CSV columns to the camera overlay. The debug panel's Swing group gets
+ * an "Ask handedness" button to change hands.
  *
  * Returns right away; it emits Swings and has a wrist position once sensing
  * has started and the hand is known, and only while the wrist is tracked.
  * It never starts the camera itself.
  */
-export function installPoseInput(registry: KnobRegistry): InstalledPoseInput {
+export function installPoseInput(registry: KnobRegistry, options: PoseInputOptions = {}): InstalledPoseInput {
+  const chooseHand = options.hand ?? (async () => handedness.hand ?? (await askHandedness()));
   const swings = createSwingEmitter();
   /** The tracked hitting wrist, once sensing has started and the hand is known. */
   let poseHand: PoseHand | null = null;
@@ -62,7 +73,7 @@ export function installPoseInput(registry: KnobRegistry): InstalledPoseInput {
 
   async function start(sensing: Sensing): Promise<void> {
     handedness.subscribe((hand) => sensing.setHand(hand));
-    const hand = handedness.hand ?? (await askHandedness());
+    const hand = await chooseHand();
     handedness.set(hand);
     sensing.setHand(hand); // in case the saved hand was already set before subscribing
 

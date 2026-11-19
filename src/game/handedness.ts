@@ -22,6 +22,8 @@ export interface HandednessStore {
   set(hand: Hand): void;
   /** Called with each new hand. Returns an unsubscribe function. */
   subscribe(listener: (hand: Hand) => void): () => void;
+  /** The hand once one is chosen: right away if saved, otherwise when the player first chooses. */
+  chosen(): Promise<Hand>;
 }
 
 const STORAGE_KEY = 'returnDrill.hand';
@@ -63,6 +65,16 @@ export function createHandednessStore(storage: () => KeyValueStorage | null): Ha
     subscribe(listener) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
+    },
+    chosen() {
+      if (hand) return Promise.resolve(hand);
+      return new Promise((resolve) => {
+        const listener = (next: Hand) => {
+          listeners.delete(listener);
+          resolve(next);
+        };
+        listeners.add(listener);
+      });
     },
   };
 }

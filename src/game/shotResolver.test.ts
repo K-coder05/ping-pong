@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SwingEvent } from '../input/types.ts';
 import type { Hand } from '../sensing/landmarks.ts';
 import { launchBall, stepBall, type BallEvent, type BallState } from './ball.ts';
-import { BALL_RADIUS, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y } from './constants.ts';
+import { BALL_RADIUS, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
 import { findIdealTime } from './feeder.ts';
 import { createShotResolver, feedResult, judgeSwingTiming, knobResolverParams, planReturn, type ResolverParams, type ShotEvent } from './shotResolver.ts';
 import { solveLaunch } from './solver.ts';
@@ -28,6 +28,24 @@ const SPEC: ResolverParams = {
 describe('knobResolverParams', () => {
   it('starts from the SPEC values', () => {
     expect(knobResolverParams()).toEqual(SPEC);
+  });
+
+  it('applies the Timing Offset knob live, so changing it shifts which Swings count as Early or Late', () => {
+    const idealAtMs = 10_000;
+    const judge = (seenAtMs: number) => {
+      const resolver = createShotResolver({ params: knobResolverParams, hand: () => 'right', random: noScatter });
+      resolver.startFeed({ idealAtMs });
+      return resolver.swing({ t: seenAtMs, peakSpeed: 3, side: 'forehand', vertPath: 0 }, seenAtMs)[0]?.type;
+    };
+    try {
+      expect(judge(idealAtMs + 300)).toBe('late');
+      expect(judge(idealAtMs - 150)).toBe('accepted');
+      TIMING_OFFSET_MS.set(150); // the game sees this player's Swings 150 ms late
+      expect(judge(idealAtMs + 300)).toBe('accepted');
+      expect(judge(idealAtMs - 150)).toBe('early');
+    } finally {
+      TIMING_OFFSET_MS.reset();
+    }
   });
 });
 

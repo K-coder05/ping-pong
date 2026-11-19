@@ -137,8 +137,10 @@ export const BOUNCE_FRICTION = knobs.number({ name: 'BOUNCE_FRICTION', min: 0.5,
 
 /**
  * The player's Timing Offset: how much later the game sees a Swing Onset than
- * the player means it, subtracted from every Swing before judging it. 0 until
- * calibration measures it.
+ * the player means it, subtracted from every Swing before judging it. Starts
+ * from the offset Timing calibration saved (`timingOffsetStore`), 0 until the
+ * player has calibrated and always 0 with the developer mouse. Calibration
+ * sets it and saves it; moving the knob only changes the current page.
  */
 export const TIMING_OFFSET_MS = knobs.number({ name: 'TIMING_OFFSET_MS', min: -100, max: 400, step: 5, default: 0, group: 'Timing' });
 /** After the Hit Window closes, a Swing within this long still shows "Late!"; after it, the Feed is a Miss. */

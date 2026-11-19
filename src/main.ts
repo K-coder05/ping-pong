@@ -7,10 +7,16 @@
  * draw from whichever camera is active. Swings arrive between frames from the
  * active `SwingSource`; the game never knows whether that is pose or mouse.
  *
- * Without a URL flag, play is with your hand: the camera starts at load,
- * Swings come only from pose, the Paddle follows the tracked wrist, and the
- * Feeder pauses (with a "Can't see your hand" banner) while the hitting wrist
- * can't be seen. `?input=mouse` swaps in the developer mouse for both.
+ * Without a URL flag, play is with your hand: onboarding starts the camera
+ * (asking first, for a first-time player), then asks for the hitting hand and
+ * runs Timing calibration if they aren't saved. Swings come only from pose,
+ * the Paddle follows the tracked wrist, and the Feeder pauses (with a "Can't
+ * see your hand" banner) while the hitting wrist can't be seen.
+ *
+ * `?input=mouse` swaps in the developer mouse for both and skips onboarding:
+ * there is no camera to start and no pose latency to calibrate. The mouse
+ * also neither reads nor saves the player's Timing Offset (it would shift the
+ * mouse's near-zero-latency Swings); TIMING_OFFSET_MS starts at 0 there.
  */
 import { createSounds, unlockAudioOnGesture } from './audio/sounds.ts';
 import { launchBall, simulate, stepBall, type BallEvent, type BallState } from './game/ball.ts';
@@ -28,15 +34,18 @@ import {
   SHOW_IDEAL_TIME_MARKER,
   TABLE_TOP_Y,
   TIME_SCALE,
+  TIMING_OFFSET_MS,
 } from './game/constants.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { createFeeder } from './game/feeder.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { createListeners } from './game/listeners.ts';
+import { onboardingSteps, runOnboarding } from './game/onboarding.ts';
 import { createScore } from './game/score.ts';
 import { contactPoint, createShotResolver, feedResult, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { createSimClock } from './game/simClock.ts';
+import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput, startCamera } from './input/installPoseInput.ts';
 import { installMouseInput, swingInputMode, type MouseInput } from './input/mouseInput.ts';
@@ -45,9 +54,12 @@ import type { SwingSource } from './input/types.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode } from './render/debugMode.ts';
+import { askHandedness } from './render/handednessPrompt.ts';
 import { createHud } from './render/hud.ts';
+import { createOnboardingScreens } from './render/onboardingScreens.ts';
 import { createPaddle } from './render/paddle.ts';
 import { createTableScene } from './render/scene.ts';
+import { sharedSensing } from './sensing/shared.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
 if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
@@ -56,15 +68,22 @@ const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
 knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
 installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
-const pose = installPoseInput(knobs); // pose Swings, wrist and tracking, once the camera is on
 const hud = createHud();
+
+/** Developer mouse mode (`?input=mouse`), never offered to players. */
+const mouseMode = swingInputMode(window.location.search) === 'mouse';
+
+// Pose Swings, wrist and tracking, once the camera is on and the hand is
+// known. In play, the hand comes from onboarding's handedness step (asked
+// after the framing instruction), not from a prompt when the camera starts.
+const pose = installPoseInput(knobs, mouseMode ? {} : { hand: () => handedness.chosen() });
 
 /** The hitting hand: as saved, or right until the player is asked. */
 const hittingHand = () => handedness.hand ?? 'right';
 
 /** The developer mouse, with `?input=mouse` only (never offered to players). */
 const mouse: MouseInput | null =
-  swingInputMode(window.location.search) === 'mouse'
+  mouseMode
     ? installMouseInput(canvas, {
         params: knobSwingParams,
         hand: hittingHand,
@@ -82,18 +101,71 @@ const swings: SwingSource = mouse ?? pose;
 const handPositions: HandPositionSource = mouse ?? pose;
 
 /**
- * Play with your hand needs the camera, so it starts at load. #14's
- * onboarding will call `startCamera` from its camera-permission step instead.
- * Until the camera is on and the hitting hand is known, the Feeder waits.
+ * The saved Timing Offset becomes the TIMING_OFFSET_MS knob's starting value;
+ * the resolver (and the Feeder's wait for a late Swing) read the knob. Only
+ * calibration saves: dragging the knob (or "Reset all knobs") changes this
+ * page's play but not what is saved, so a returning player's next visit still
+ * uses their measured offset. Redo calibration to replace it.
  */
-// If the camera can't start (e.g. permission denied), play just waits: no Feed
-// and no banner. #14's permission step is where the player gets told.
-if (!mouse) startCamera().catch((error: unknown) => console.error('Camera failed to start', error));
+if (!mouse && timingOffsetStore.offsetMs !== null) TIMING_OFFSET_MS.set(timingOffsetStore.offsetMs);
+
+const onboardingScreens = createOnboardingScreens();
+/** Whether onboarding has finished, so the drill may feed. */
+let drillStarted = false;
+/** Whether Timing calibration is running: its Swings are not for the resolver, and the Feeder waits. */
+let calibrating = false;
+
+/** Run Timing calibration and use (and, in play, save) the Timing Offset it measures. */
+async function calibrate(cancellable: boolean): Promise<void> {
+  calibrating = true;
+  try {
+    const video = mouse ? null : (await sharedSensing()).video;
+    const offsetMs = await onboardingScreens.calibrate({ video, swings, cancellable });
+    if (offsetMs === null) return;
+    TIMING_OFFSET_MS.set(offsetMs); // snapped to the knob's 5 ms grid and clamped to its range
+    if (!mouse) timingOffsetStore.save(TIMING_OFFSET_MS.value);
+    console.info(`Timing Offset: measured ${offsetMs} ms, using ${TIMING_OFFSET_MS.value} ms`);
+  } finally {
+    calibrating = false;
+  }
+}
+
+/**
+ * Onboarding: the steps this player still needs (SPEC "Onboarding for the
+ * prototype"), then the drill. Starting the camera lives here, in its first
+ * step; if it can't start, the player is told why and can try again.
+ */
+const steps = onboardingSteps({
+  input: mouse ? 'mouse' : 'pose',
+  handSaved: handedness.hand !== null,
+  timingOffsetSaved: timingOffsetStore.offsetMs !== null,
+});
+void runOnboarding(steps, {
+  'ask-camera': () => onboardingScreens.askCamera(startCamera),
+  'start-camera': () => onboardingScreens.startCamera(startCamera),
+  framing: async () => onboardingScreens.framing((await sharedSensing()).video),
+  handedness: async () => handedness.set(await askHandedness()),
+  calibration: () => calibrate(false),
+}).then(
+  () => (drillStarted = true),
+  (error: unknown) => console.error('Onboarding failed', error),
+);
+
+knobs.button({
+  name: 'Redo calibration',
+  group: 'Timing',
+  onPress: () => {
+    if (!drillStarted || calibrating) return; // onboarding still running, or already calibrating
+    calibrate(true).catch((error: unknown) => console.error('Calibration failed', error));
+  },
+});
 
 /** Whether the Feeder must wait for the player's hand: never with the mouse. */
 const waitingForHand = (): boolean => !mouse && pose.tracking !== 'tracked';
 /** Whether to show "Can't see your hand": once pose is running, until the wrist is first seen and whenever it is lost. */
 const handLost = (): boolean => !mouse && pose.tracking === 'lost';
+/** Whether the drill is on: onboarding done and not recalibrating. */
+const drilling = (): boolean => drillStarted && !calibrating;
 
 /**
  * The one ball in play: at rest on the player's half until something launches
@@ -168,7 +240,9 @@ feeder.onFeed((feed) => {
   ball = feed.ball;
   resolver.startFeed(feed);
 });
-swings.subscribe((swing) => resolver.swing(swing, performance.now()).forEach(handleShot));
+swings.subscribe((swing) => {
+  if (drilling()) resolver.swing(swing, performance.now()).forEach(handleShot);
+});
 score.subscribe(({ streak, best }) => {
   feeder.setStreak(streak); // faster Feeds every FEED_SPEEDUP_EVERY Returns
   hud.showStreak(streak, best);
@@ -224,9 +298,10 @@ function frame(now: number): void {
 
   // The pause and "3, 2, 1" run on real time, capped like the simulation so a
   // background tab doesn't fire a Feed the moment it comes back. No new Feed
-  // while the hand can't be seen; a Feed in flight plays out.
-  feeder.setPaused(waitingForHand());
-  hud.showHandLost(handLost());
+  // before onboarding finishes, while recalibrating, or while the hand can't
+  // be seen; a Feed in flight plays out.
+  feeder.setPaused(!drilling() || waitingForHand());
+  hud.showHandLost(drilling() && handLost());
   feeder.update({ realSeconds: Math.min(elapsedSeconds, MAX_FRAME_DT), simSeconds: steps * PHYSICS_DT, nowMs: now }, ball);
   hud.showCountdown(feeder.countdown);
 

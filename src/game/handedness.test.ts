@@ -56,3 +56,22 @@ describe('handedness store', () => {
     }
   });
 });
+
+describe('waiting for the hand to be chosen', () => {
+  it('resolves at once with a saved hand', async () => {
+    const storage = memoryStorage();
+    createHandednessStore(() => storage).set('left');
+    await expect(createHandednessStore(() => storage).chosen()).resolves.toBe('left');
+  });
+
+  it('resolves when the player first chooses', async () => {
+    const store = createHandednessStore(() => memoryStorage());
+    let hand: string | null = null;
+    void store.chosen().then((chosen) => (hand = chosen));
+    await Promise.resolve();
+    expect(hand).toBeNull();
+    store.set('right');
+    await Promise.resolve();
+    expect(hand).toBe('right');
+  });
+});
