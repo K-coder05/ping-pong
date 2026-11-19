@@ -135,8 +135,34 @@ export const FEED_COUNTDOWN_STEP_S = knobs.number({ name: 'FEED_COUNTDOWN_STEP_S
 /** Horizontal speed kept by a table bounce (friction). */
 export const BOUNCE_FRICTION = knobs.number({ name: 'BOUNCE_FRICTION', min: 0.5, max: 1, step: 0.01, default: 0.9, group: 'Physics' });
 
+/**
+ * The player's Timing Offset: how much later the game sees a Swing Onset than
+ * the player means it, subtracted from every Swing before judging it. 0 until
+ * calibration measures it.
+ */
+export const TIMING_OFFSET_MS = knobs.number({ name: 'TIMING_OFFSET_MS', min: -100, max: 400, step: 5, default: 0, group: 'Timing' });
+/** After the Hit Window closes, a Swing within this long still shows "Late!"; after it, the Feed is a Miss. */
+export const LATE_GRACE_MS = knobs.number({ name: 'LATE_GRACE_MS', min: 0, max: 1000, step: 10, default: 300, group: 'Timing' });
+
 /** Return direction spread: how far timing can push a Return sideways, metres. */
 export const DIRECTION_SPREAD_M = knobs.number({ name: 'DIRECTION_SPREAD_M', min: 0, max: 0.75, step: 0.05, default: 0.6, group: 'Return' });
+/** Share of the Hit Window, around the Ideal Time, whose Returns always land in. */
+export const RETURN_SAFE_FRACTION = knobs.number({ name: 'RETURN_SAFE_FRACTION', min: 0, max: 1, step: 0.05, default: 0.7, group: 'Return' });
+/** How far a Return at the very edge of the Hit Window is pushed long, metres. */
+export const RETURN_LONG_PUSH_M = knobs.number({ name: 'RETURN_LONG_PUSH_M', min: 0, max: 1, step: 0.05, default: 0.4, group: 'Return' });
+/** Flight time of the softest Return (peak speed at SWING_ON), simulated seconds. */
+export const RETURN_FLIGHT_SOFT_S = knobs.number({ name: 'RETURN_FLIGHT_SOFT_S', min: 0.3, max: 1.5, step: 0.05, default: 1, group: 'Return' });
+/** Flight time of a full-power Return (peak speed at SWING_FAST), simulated seconds. */
+export const RETURN_FLIGHT_HARD_S = knobs.number({ name: 'RETURN_FLIGHT_HARD_S', min: 0.3, max: 1.5, step: 0.05, default: 0.55, group: 'Return' });
+/** How far past the net the softest Return lands, metres. */
+export const RETURN_DEPTH_SOFT_M = knobs.number({ name: 'RETURN_DEPTH_SOFT_M', min: 0.2, max: 1.3, step: 0.05, default: 0.6, group: 'Return' });
+/** How far past the net a full-power Return lands, metres. */
+export const RETURN_DEPTH_HARD_M = knobs.number({ name: 'RETURN_DEPTH_HARD_M', min: 0.2, max: 1.3, step: 0.05, default: 1.2, group: 'Return' });
+/** Most random scatter of a Return's landing spot on x and z (scaled by 1 − timing quality), metres. */
+export const RETURN_SCATTER_M = knobs.number({ name: 'RETURN_SCATTER_M', min: 0, max: 0.3, step: 0.01, default: 0.1, group: 'Return' });
+
+/** Developer mouse mode: shoulder width as a share of the canvas width (SPEC: the screen width). */
+export const MOUSE_SHOULDER_WIDTH = knobs.number({ name: 'MOUSE_SHOULDER_WIDTH', min: 0.1, max: 2, step: 0.05, default: 1, group: 'Swing' });
 
 /** One Euro filter cutoff at rest, Hz. */
 export const ONE_EURO_MIN_CUTOFF = knobs.number({ name: 'ONE_EURO_MIN_CUTOFF', min: 0.1, max: 5, step: 0.1, default: 1, group: 'Smoothing' });
