@@ -53,6 +53,17 @@ export const DRAG_K = (0.5 * AIR_DENSITY * DRAG_COEFFICIENT * Math.PI * BALL_RAD
 export const PHYSICS_DT = 1 / 240;
 /** Longest frame the game loop will catch up on (e.g. after a background tab). */
 export const MAX_FRAME_DT = 0.1;
+/**
+ * Below this downward speed (m/s, about a 3 mm drop) a surface contact is not a
+ * bounce: the ball settles. Otherwise a resting ball would "bounce" every
+ * substep, buzzing the bounce sound and tripping the double-bounce rule.
+ */
+export const SETTLE_SPEED = 0.25;
+/** Share of its speed toward the net a ball keeps, dropping back off it (no net-cord physics). */
+export const NET_REBOUND = 0.1;
+/** The floor is scenery: it only stops a ball that left the table from falling forever. */
+export const FLOOR_RESTITUTION = 0.6;
+export const FLOOR_FRICTION = 0.8;
 
 // ---------------------------------------------------------------------------
 // Play camera: about eye height behind the player's end, looking at the Feeder

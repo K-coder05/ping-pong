@@ -5,21 +5,25 @@
  * Everything here is pure and headless: the game loop steps it in real time,
  * and the Feeder and target solver call `simulate` to look ahead.
  *
- * Physical contacts (table, net) always happen; the rally rules only apply
- * while the ball is live. A ball that hits the net is dead; one that drops
- * below the table top outside its edges, or bounces twice on one half, is out.
- * Either way it keeps falling and bouncing so it looks right, but it never
- * changes status again.
+ * Physical contacts (table, net, floor) always happen; the rally rules only
+ * apply while the ball is live. A ball that hits the net is dead; one that
+ * drops below the table top outside its edges, or bounces twice on one half,
+ * is out. Either way it keeps falling and bouncing so it looks right, but it
+ * never changes status again.
  */
 
 import {
   BALL_RADIUS,
   BOUNCE_FRICTION,
   DRAG_K,
+  FLOOR_FRICTION,
+  FLOOR_RESTITUTION,
   GRAVITY,
   NET_HEIGHT,
   NET_LENGTH,
+  NET_REBOUND,
   PHYSICS_DT,
+  SETTLE_SPEED,
   TABLE_HALF_LENGTH,
   TABLE_RESTITUTION,
   TABLE_TOP_Y,
@@ -47,9 +51,12 @@ export interface BallState {
 }
 
 export type BallEvent =
-  /** The ball hit the table top. Fires for every audible bounce, live or not. */
+  /**
+   * The ball bounced on the table top. Fires for every audible bounce, live or
+   * not, so it drives the bounce sound; rules (Returns) must also check status.
+   */
   | { readonly type: 'bounce'; readonly half: TableHalf; readonly position: Readonly<Vec3> }
-  /** A live ball crossed z = 0 below net height: it is now dead. */
+  /** A live ball crossed z = 0 with its bottom below the net top: it is now dead. */
   | { readonly type: 'net'; readonly position: Readonly<Vec3> }
   /** A live ball ended the rally: below the table top outside its edges, or a second bounce on one half. */
   | { readonly type: 'out'; readonly reason: OutReason; readonly position: Readonly<Vec3> };
@@ -70,21 +77,12 @@ export function launchBall(position: Vec3, velocity: Vec3): BallState {
 /** Ball centre height when its bottom touches the table top. */
 const TABLE_CONTACT_Y = TABLE_TOP_Y + BALL_RADIUS;
 const NET_TOP_Y = TABLE_TOP_Y + NET_HEIGHT;
-/** Share of its speed toward the net that a ball keeps, bouncing back off it. */
-const NET_REBOUND = 0.1;
-/**
- * Below this downward speed (m/s) a table contact is not a bounce: the ball
- * settles instead (about a 3 mm drop). Otherwise a resting ball would "bounce"
- * every substep, buzzing the bounce sound and tripping the double-bounce rule.
- */
-const SETTLE_SPEED = 0.25;
-/** The floor is only scenery: it stops a ball that left the table from falling forever. */
-const FLOOR_RESTITUTION = 0.6;
 
-interface Hit {
+/** Where the ball meets a surface along the rest of its substep. */
+interface Crossing {
   /** Fraction of the remaining segment at which the crossing happens, 0..1. */
-  f: number;
-  kind: 'table' | 'net' | 'floor';
+  fraction: number;
+  surface: 'table' | 'net' | 'floor';
 }
 
 /** Advance one substep. Collisions are swept along the substep, so a fast ball can't skip through. */
@@ -105,20 +103,20 @@ export function stepBall(state: BallState, dt: number = PHYSICS_DT): { state: Ba
   let remaining = dt;
   for (let guard = 0; guard < 4 && remaining > 0; guard++) {
     const next = { x: p.x + v.x * remaining, y: p.y + v.y * remaining, z: p.z + v.z * remaining };
-    const hit = earliestHit(p, next);
-    if (!hit) {
+    const crossing = earliestCrossing(p, next);
+    if (!crossing) {
       Object.assign(p, next);
       break;
     }
-    lerpInto(p, next, hit.f);
-    remaining *= 1 - hit.f;
+    Object.assign(p, lerp(p, next, crossing.fraction));
+    remaining *= 1 - crossing.fraction;
 
-    if (hit.kind === 'floor') {
+    if (crossing.surface === 'floor') {
       p.y = BALL_RADIUS;
-      bounceOffSurface(v, FLOOR_RESTITUTION);
-    } else if (hit.kind === 'table') {
+      bounceOffSurface(v, FLOOR_RESTITUTION, FLOOR_FRICTION);
+    } else if (crossing.surface === 'table') {
       p.y = TABLE_CONTACT_Y;
-      if (!bounceOffSurface(v, TABLE_RESTITUTION)) continue;
+      if (!bounceOffSurface(v, TABLE_RESTITUTION, BOUNCE_FRICTION.value)) continue;
       const half = halfAt(p.z);
       events.push({ type: 'bounce', half, position: { ...p } });
       if (status === 'live') {
@@ -148,12 +146,11 @@ export function stepBall(state: BallState, dt: number = PHYSICS_DT): { state: Ba
 }
 
 /**
- * Bounce a ball moving down onto a horizontal surface: restitution on the
- * vertical speed, BOUNCE_FRICTION on the horizontal. Returns false when the
- * ball was too slow to bounce and has settled on the surface instead.
+ * Bounce a ball moving down off a horizontal surface: restitution on the
+ * vertical speed, friction on the horizontal. Returns false when the ball was
+ * too slow to bounce and has settled on the surface instead.
  */
-function bounceOffSurface(v: Vec3, restitution: number): boolean {
-  const friction = BOUNCE_FRICTION.value;
+function bounceOffSurface(v: Vec3, restitution: number, friction: number): boolean {
   v.x *= friction;
   v.z *= friction;
   if (-v.y < SETTLE_SPEED) {
@@ -164,30 +161,35 @@ function bounceOffSurface(v: Vec3, restitution: number): boolean {
   return true;
 }
 
-/** The first table or net crossing on the segment from `a` to `b`, if any. */
-function earliestHit(a: Vec3, b: Vec3): Hit | null {
-  let best: Hit | null = null;
+/** The first table, net or floor crossing on the segment from `a` to `b`, if any. */
+function earliestCrossing(a: Vec3, b: Vec3): Crossing | null {
+  let best: Crossing | null = null;
 
   // Table: the ball's bottom passes down through the table top, over the table.
-  if (b.y < a.y && a.y >= TABLE_CONTACT_Y && b.y < TABLE_CONTACT_Y) {
-    const f = (a.y - TABLE_CONTACT_Y) / (a.y - b.y);
-    if (isOverTable(lerp(a, b, f))) best = { f, kind: 'table' };
-  }
+  const table = downwardCrossing(a, b, TABLE_CONTACT_Y);
+  if (table !== null && isOverTable(lerp(a, b, table))) best = { fraction: table, surface: 'table' };
 
   // Floor: anywhere (nothing can be lower, so it never competes with the table).
-  if (!best && b.y < a.y && a.y >= BALL_RADIUS && b.y < BALL_RADIUS) {
-    best = { f: (a.y - BALL_RADIUS) / (a.y - b.y), kind: 'floor' };
-  }
+  const floor = downwardCrossing(a, b, BALL_RADIUS);
+  if (!best && floor !== null) best = { fraction: floor, surface: 'floor' };
 
-  // Net: the ball's centre crosses z = 0 while the ball overlaps the net.
-  if ((a.z > 0 && b.z <= 0) || (a.z < 0 && b.z >= 0)) {
-    const f = a.z / (a.z - b.z);
-    const at = lerp(a, b, f);
+  // Net: the ball's centre crosses z = 0 while any part of it is below the net
+  // top (clearing the net means the ball's bottom clears it), anywhere along
+  // the net including its overhang past the side lines.
+  if ((a.z >= 0 && b.z < 0) || (a.z <= 0 && b.z > 0)) {
+    const fraction = a.z / (a.z - b.z);
+    const at = lerp(a, b, fraction);
     const overlapsNet = at.y - BALL_RADIUS < NET_TOP_Y && at.y + BALL_RADIUS > TABLE_TOP_Y && Math.abs(at.x) <= NET_LENGTH / 2;
-    if (overlapsNet && (!best || f < best.f)) best = { f, kind: 'net' };
+    if (overlapsNet && (!best || fraction < best.fraction)) best = { fraction, surface: 'net' };
   }
 
   return best;
+}
+
+/** Fraction along `a` → `b` at which the ball centre passes down through height `y`, or null. */
+function downwardCrossing(a: Vec3, b: Vec3, y: number): number | null {
+  if (!(b.y < a.y && a.y >= y && b.y < y)) return null;
+  return (a.y - y) / (a.y - b.y);
 }
 
 export interface SimulateOptions {
@@ -231,10 +233,6 @@ function halfAt(z: number): TableHalf {
   return z >= 0 ? 'player' : 'feeder';
 }
 
-function lerp(a: Vec3, b: Vec3, f: number): Vec3 {
-  return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f };
-}
-
-function lerpInto(a: Vec3, b: Vec3, f: number): void {
-  Object.assign(a, lerp(a, b, f));
+function lerp(a: Vec3, b: Vec3, fraction: number): Vec3 {
+  return { x: a.x + (b.x - a.x) * fraction, y: a.y + (b.y - a.y) * fraction, z: a.z + (b.z - a.z) * fraction };
 }
