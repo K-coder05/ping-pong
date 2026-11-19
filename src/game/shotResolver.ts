@@ -1,0 +1,308 @@
+/**
+ * Shot resolver (SPEC "Shot resolver and target solver", ADR 0001): decides
+ * from Swing timing alone whether a Feed is returned, and where the Return goes.
+ * The game never checks whether the Paddle touches the ball.
+ */
+
+import type { SwingEvent } from '../input/types.ts';
+import type { Hand } from '../sensing/landmarks.ts';
+import { launchBall, type BallEvent, type BallState, type Vec3 } from './ball.ts';
+import {
+  BALL_RADIUS,
+  DIRECTION_SPREAD_M,
+  EARLY_SWING_USES_TRY,
+  HIT_WINDOW_MS,
+  LATE_GRACE_MS,
+  RETURN_DEPTH_HARD_M,
+  RETURN_DEPTH_SOFT_M,
+  RETURN_FLIGHT_HARD_S,
+  RETURN_FLIGHT_SOFT_S,
+  RETURN_LONG_PUSH_M,
+  RETURN_SAFE_FRACTION,
+  RETURN_SCATTER_M,
+  SWING_FAST,
+  SWING_ON,
+  TABLE_TOP_Y,
+  TIMING_OFFSET_MS,
+} from './constants.ts';
+import { judgeReturnFlight, type ReturnFlightResult } from './score.ts';
+import { solveLaunch, type TablePoint } from './solver.ts';
+
+/** Live tuning values, read on every use (knobs in the game). */
+export interface ResolverParams {
+  /** Half-width W of the Hit Window around the Ideal Time, ms. */
+  hitWindowMs: number;
+  /** The player's Timing Offset: how much later the game sees a Swing Onset than the player means it, ms. */
+  timingOffsetMs: number;
+  /** A Swing more than W early uses up the Feed's one try. */
+  earlySwingUsesTry: boolean;
+  /** How long after the Hit Window closes a Swing still counts as Late (not Miss), ms. */
+  lateGraceMs: number;
+  /** `SWING_ON`: the softest Swing, shoulder widths/s. */
+  swingOn: number;
+  /** `SWING_FAST`: a full-power Swing, shoulder widths/s. */
+  swingFast: number;
+  /** How far timing pushes a Return sideways at the edge of the window, metres. */
+  directionSpreadM: number;
+  /** Share of the window (around the Ideal Time) whose Returns always land in. */
+  safeFraction: number;
+  /** How far past its depth a Return at the very edge of the window is pushed long, metres. */
+  longPushM: number;
+  /** Flight time of the softest Return, simulated seconds. */
+  flightTimeSoftS: number;
+  /** Flight time of a full-power Return, simulated seconds. */
+  flightTimeHardS: number;
+  /** Landing distance past the net of the softest Return, metres. */
+  depthSoftM: number;
+  /** Landing distance past the net of a full-power Return, metres. */
+  depthHardM: number;
+  /** Most random scatter on x and z (scaled by 1 − timing quality), metres. */
+  scatterM: number;
+}
+
+/** What a Return is planned from: an accepted Swing, its timing and the player's hand. */
+export interface ReturnInput {
+  /** Corrected Swing Onset minus Ideal Time, ms (negative = early); within the Hit Window. */
+  delta: number;
+  peakSpeed: number;
+  side: SwingEvent['side'];
+  hand: Hand;
+}
+
+/** Where and how fast a Return is aimed; the target solver turns it into a launch. */
+export interface ReturnPlan {
+  /** Landing spot on the Feeder's half (z < 0), or past its edge for a deliberate miss. */
+  target: TablePoint;
+  /** Simulated seconds from contact to landing. */
+  flightTime: number;
+  /** Timing quality q = 1 − |delta| / W: 1 at the Ideal Time, 0 at the edge of the window. */
+  quality: number;
+}
+
+/**
+ * Pick a Return's landing spot and pace (SPEC "From Swing to Return"). Timing
+ * picks the direction: early goes cross-court, late down the line, mirrored
+ * for a Backhand and for a left-hander.
+ */
+export function planReturn(input: ReturnInput, params: ResolverParams, random: () => number): ReturnPlan {
+  const W = params.hitWindowMs;
+  const quality = 1 - Math.abs(input.delta) / W;
+  // World +x is the player's right. A right-hander's Forehand is struck on
+  // their right, so cross-court (early) goes left: −x.
+  const sideSign = (input.side === 'forehand' ? -1 : 1) * (input.hand === 'left' ? -1 : 1);
+  const x = sideSign * (-input.delta / W) * params.directionSpreadM;
+  // Swing power, 0 (SWING_ON) to 1 (SWING_FAST), picks pace and depth.
+  const power = clamp01((input.peakSpeed - params.swingOn) / (params.swingFast - params.swingOn));
+  const flightTime = lerp(params.flightTimeSoftS, params.flightTimeHardS, power);
+  // The inner safeFraction of the window always lands in; past it, the target
+  // moves long, up to longPushM at the very edge, so the Return can miss.
+  const offCentre = Math.abs(input.delta) / W;
+  const risk = clamp01((offCentre - params.safeFraction) / (1 - params.safeFraction));
+  const depth = lerp(params.depthSoftM, params.depthHardM, power) + risk * params.longPushM;
+  // Natural variation, none for a perfectly timed Swing. It moves the target,
+  // never the launch velocity (ADR 0001).
+  const scatter = () => (2 * random() - 1) * params.scatterM * (1 - quality);
+  return { target: { x: x + scatter(), z: -depth + scatter() }, flightTime, quality };
+}
+
+function clamp01(value: number): number {
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+}
+
+function lerp(a: number, b: number, f: number): number {
+  return a + (b - a) * f;
+}
+
+/** The resolver's parameters from the live knobs; the game passes this as `params`. */
+export function knobResolverParams(): ResolverParams {
+  return {
+    hitWindowMs: HIT_WINDOW_MS.value,
+    timingOffsetMs: TIMING_OFFSET_MS.value,
+    earlySwingUsesTry: EARLY_SWING_USES_TRY.value,
+    lateGraceMs: LATE_GRACE_MS.value,
+    swingOn: SWING_ON.value,
+    swingFast: SWING_FAST.value,
+    directionSpreadM: DIRECTION_SPREAD_M.value,
+    safeFraction: RETURN_SAFE_FRACTION.value,
+    longPushM: RETURN_LONG_PUSH_M.value,
+    flightTimeSoftS: RETURN_FLIGHT_SOFT_S.value,
+    flightTimeHardS: RETURN_FLIGHT_HARD_S.value,
+    depthSoftM: RETURN_DEPTH_SOFT_M.value,
+    depthHardM: RETURN_DEPTH_HARD_M.value,
+    scatterM: RETURN_SCATTER_M.value,
+  };
+}
+
+export type SwingTiming = 'early' | 'accepted' | 'late';
+
+/**
+ * Compare a Swing Onset with the Feed's Ideal Time, both on the
+ * performance.now() clock: `delta` is the Onset corrected by the Timing
+ * Offset, minus the Ideal Time (negative = early).
+ */
+export function judgeSwingTiming(onsetMs: number, idealAtMs: number, params: ResolverParams): { timing: SwingTiming; delta: number } {
+  const delta = onsetMs - params.timingOffsetMs - idealAtMs;
+  const W = params.hitWindowMs;
+  const timing: SwingTiming = delta < -W ? 'early' : delta > W ? 'late' : 'accepted';
+  return { timing, delta };
+}
+
+/**
+ * What the resolver reports, as it happens. A Feed ends with exactly one
+ * `return`, `off-target`, final `early`, `late` or `miss` (see `feedResult`).
+ */
+export type ShotEvent =
+  /**
+   * A Swing more than W before the Ideal Time. `final` when it used up the
+   * Feed's try (EARLY_SWING_USES_TRY); otherwise the try is kept, and if no
+   * later Swing is accepted the Feed ends with a final `early`.
+   */
+  | { readonly type: 'early'; readonly delta: number; readonly final: boolean }
+  /** A Swing more than W after the Ideal Time. */
+  | { readonly type: 'late'; readonly delta: number }
+  /** No Swing by the end of the Late grace after the Hit Window. */
+  | { readonly type: 'miss' }
+  /** A Swing in the Hit Window: the Feed will be returned at `contactAtMs`. */
+  | {
+      readonly type: 'accepted';
+      readonly swing: SwingEvent;
+      readonly delta: number;
+      /** When contact will happen: max(now, Ideal Time), performance.now() clock. */
+      readonly contactAtMs: number;
+      readonly plan: ReturnPlan;
+    }
+  /** Contact: the Return was launched (the game makes `ball` the ball in play). */
+  | {
+      readonly type: 'contact';
+      /** performance.now() of the launch (the frame at or just after the planned contact). */
+      readonly atMs: number;
+      /** Where the ball was struck. */
+      readonly position: Readonly<Vec3>;
+      readonly swing: SwingEvent;
+      readonly side: SwingEvent['side'];
+      readonly delta: number;
+      readonly plan: ReturnPlan;
+      /** The Return, just launched. */
+      readonly ball: BallState;
+    }
+  | ReturnFlightResult;
+
+/** Whether `event` ends its Feed: `returned` for a Return, `failed` for anything that breaks the Streak, else null. */
+export function feedResult(event: ShotEvent): 'returned' | 'failed' | null {
+  switch (event.type) {
+    case 'return':
+      return 'returned';
+    case 'off-target':
+    case 'late':
+    case 'miss':
+      return 'failed';
+    case 'early':
+      return event.final ? 'failed' : null;
+    default:
+      return null;
+  }
+}
+
+/** The part of a Feed the resolver judges against. */
+export interface FeedTiming {
+  /** The Feed's Ideal Time on the performance.now() clock; null if it never reaches the player. */
+  readonly idealAtMs: number | null;
+}
+
+export interface ShotResolver {
+  /** A new Feed was launched: its one try is available. */
+  startFeed(feed: FeedTiming): void;
+  /** Judge a Swing, received at `nowMs`. Swings with no Feed to judge, or after the try is used, are ignored. */
+  swing(swing: SwingEvent, nowMs: number): ShotEvent[];
+  /**
+   * Once per frame, after physics: `ball` is the ball in play and
+   * `ballEvents` what it did this frame. Launches a due contact and judges
+   * the Return's flight.
+   */
+  update(nowMs: number, ball: BallState, ballEvents: readonly BallEvent[]): ShotEvent[];
+}
+
+export interface ShotResolverOptions {
+  params: () => ResolverParams;
+  /** The player's hitting hand, read at each accepted Swing. */
+  hand: () => Hand;
+  /** Uniform random numbers in [0, 1) for scatter; inject a fixed one in tests. */
+  random?: () => number;
+}
+
+type FeedState =
+  | { readonly phase: 'none' }
+  /** Waiting for a Swing. `earlyDelta`: the last early Swing that kept the try, if any. */
+  | { readonly phase: 'open'; readonly idealAtMs: number | null; readonly earlyDelta: number | null }
+  | { readonly phase: 'accepted'; readonly accepted: Extract<ShotEvent, { type: 'accepted' }> }
+  | { readonly phase: 'returning' }
+  | { readonly phase: 'done' };
+
+export function createShotResolver(options: ShotResolverOptions): ShotResolver {
+  const random = options.random ?? Math.random;
+  let state: FeedState = { phase: 'none' };
+
+  return {
+    startFeed(feed) {
+      state = { phase: 'open', idealAtMs: feed.idealAtMs, earlyDelta: null };
+    },
+
+    swing(swing, nowMs) {
+      if (state.phase !== 'open' || state.idealAtMs === null) return [];
+      const params = options.params();
+      const { timing, delta } = judgeSwingTiming(swing.t, state.idealAtMs, params);
+      if (timing === 'early') {
+        const final = params.earlySwingUsesTry;
+        state = final ? { phase: 'done' } : { ...state, earlyDelta: delta };
+        return [{ type: 'early', delta, final }];
+      }
+      if (timing === 'late') {
+        state = { phase: 'done' };
+        return [{ type: 'late', delta }];
+      }
+      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, side: swing.side, hand: options.hand() }, params, random);
+      const accepted = { type: 'accepted', swing, delta, contactAtMs: Math.max(nowMs, state.idealAtMs), plan } as const;
+      state = { phase: 'accepted', accepted };
+      return [accepted];
+    },
+
+    update(nowMs, ball, ballEvents) {
+      const events: ShotEvent[] = [];
+      if (state.phase === 'returning') {
+        const flight = judgeReturnFlight(ballEvents);
+        if (flight) {
+          state = { phase: 'done' };
+          events.push(flight);
+        }
+      }
+      if (state.phase === 'accepted' && nowMs >= state.accepted.contactAtMs) {
+        const { swing, delta, plan } = state.accepted;
+        const position = contactPoint(ball.position);
+        const launch = solveLaunch(position, plan.target, plan.flightTime);
+        events.push({ type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: launchBall(position, launch.velocity) });
+        state = { phase: 'returning' };
+      }
+      if (state.phase === 'open') {
+        // No Swing judged by the end of the Late grace (a Swing is seen
+        // timingOffsetMs late): a Miss. A Feed that never reaches the player
+        // (no Ideal Time, only at extreme knob values) can't be hit at all.
+        const { hitWindowMs, lateGraceMs, timingOffsetMs } = options.params();
+        if (state.idealAtMs === null || nowMs > state.idealAtMs + timingOffsetMs + hitWindowMs + lateGraceMs) {
+          events.push(state.earlyDelta === null ? { type: 'miss' } : { type: 'early', delta: state.earlyDelta, final: true });
+          state = { phase: 'done' };
+        }
+      }
+      return events;
+    },
+  };
+}
+
+/**
+ * Where a Return is struck: the ball's position now, but never below the
+ * table top. A late Swing can meet a ball that has already dropped past the
+ * end of the table; struck from there it would count as out at once, but a
+ * Swing in the Hit Window is always struck (ADR 0001).
+ */
+function contactPoint(ball: Readonly<Vec3>): Vec3 {
+  return { x: ball.x, y: Math.max(ball.y, TABLE_TOP_Y + BALL_RADIUS), z: ball.z };
+}

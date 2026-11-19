@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { launchBall, stepBall, type BallEvent, type BallState } from './ball.ts';
-import { BALL_RADIUS, FEED_FLIGHT_TIME_S, FEEDER_MOUTH, HIT_WINDOW_MS, PHYSICS_DT, PLAYER_END_Z, TABLE_TOP_Y, TIME_SCALE } from './constants.ts';
+import { BALL_RADIUS, FEED_FLIGHT_TIME_S, FEEDER_MOUTH, HIT_WINDOW_MS, PHYSICS_DT, PLAYER_END_Z, TABLE_TOP_Y, TIME_SCALE, TIMING_OFFSET_MS } from './constants.ts';
 import { createFeeder, findIdealTime, type Feed, type Feeder } from './feeder.ts';
 import { createSimClock } from './simClock.ts';
 import { solveLaunch } from './solver.ts';
@@ -156,6 +156,26 @@ describe('Feeder scheduling', () => {
     game.run(0.2);
     expect(rallyEnds).toBe(1);
     expect(feeder.phase).toBe('waiting');
+  });
+
+  it('holds the rally longer by the Timing Offset, since a Swing is seen that much later than meant', () => {
+    TIMING_OFFSET_MS.set(150);
+    try {
+      const feeder = createFeeder({ random: seededRandom(4) });
+      let rallyEnds = 0;
+      feeder.onRallyEnd(() => rallyEnds++);
+      const game = driver(feeder);
+      game.run(3.1);
+      const lastAcceptedOnsetMs = feeder.currentFeed!.idealAtMs! + HIT_WINDOW_MS.value + 150;
+
+      game.setBall(OUT_BALL);
+      game.run((lastAcceptedOnsetMs - 100 - game.nowMs) / 1000);
+      expect(rallyEnds).toBe(0);
+      game.run(0.2);
+      expect(rallyEnds).toBe(1);
+    } finally {
+      TIMING_OFFSET_MS.reset();
+    }
   });
 
   it('does not take a ball at the top of a bounce for one at rest', () => {

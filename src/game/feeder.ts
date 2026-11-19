@@ -33,6 +33,7 @@ import {
   PLAYER_END_Z,
   TABLE_TOP_Y,
   TIME_SCALE,
+  TIMING_OFFSET_MS,
 } from './constants.ts';
 import { simSecondsToRealMs } from './simClock.ts';
 import { solveLaunch, type TablePoint } from './solver.ts';
@@ -230,11 +231,13 @@ function ballIsDone(ball: BallState): boolean {
 
 /**
  * Whether a Swing could still return the Feed: until HIT_WINDOW_MS after its
- * Ideal Time. A Feed is out moments after it passes the player's end, but a
- * late Swing launches the Return from wherever the ball is, so the rally waits.
+ * Ideal Time, plus the Timing Offset (a Swing is seen that much later than
+ * the player meant it). A Feed is out moments after it passes the player's
+ * end, but a late Swing launches the Return from wherever the ball is, so the
+ * rally waits.
  */
 function hitWindowIsOpen(feed: Feed | null, nowMs: number): boolean {
-  return feed?.idealAtMs != null && nowMs < feed.idealAtMs + HIT_WINDOW_MS.value;
+  return feed?.idealAtMs != null && nowMs < feed.idealAtMs + HIT_WINDOW_MS.value + TIMING_OFFSET_MS.value;
 }
 
 /** A Feed to a random spot on the player's half, solved for `flightTime` and launched at `nowMs`. */

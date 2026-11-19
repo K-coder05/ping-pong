@@ -49,10 +49,11 @@ export interface PoseInputOptions {
  */
 const MIN_SHOULDER_WIDTH = 0.04;
 
-const knobParams = (): SwingParams => ({ swingOn: SWING_ON.value, swingOff: SWING_OFF.value, cooldownMs: SWING_COOLDOWN_MS.value });
+/** Swing detector thresholds from the live `SWING_ON`, `SWING_OFF` and `SWING_COOLDOWN_MS` knobs (pose and mouse). */
+export const knobSwingParams = (): SwingParams => ({ swingOn: SWING_ON.value, swingOff: SWING_OFF.value, cooldownMs: SWING_COOLDOWN_MS.value });
 
 export function createPoseInput(sensing: FrameSource, options: PoseInputOptions): PoseInput {
-  const detector = createSwingDetector(options.params ?? knobParams);
+  const detector = createSwingDetector(options.params ?? knobSwingParams);
   const swings = createSwingEmitter();
   let hand: Hand | null = null;
 
