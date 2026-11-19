@@ -170,6 +170,10 @@ export const ONE_EURO_MIN_CUTOFF = knobs.number({ name: 'ONE_EURO_MIN_CUTOFF', m
 export const ONE_EURO_BETA = knobs.number({ name: 'ONE_EURO_BETA', min: 0, max: 0.1, step: 0.001, default: 0.01, group: 'Smoothing' });
 /** Hitting-wrist visibility below which the wrist counts as lost (tracking-loss banner). */
 export const TRACKING_MIN_VISIBILITY = 0.5;
+/** The hitting wrist is lost after more than this many camera frames in a row below `TRACKING_MIN_VISIBILITY` (~170 ms at 30 FPS). */
+export const TRACKING_LOST_FRAMES = 5;
+/** A lost (or never seen) hitting wrist is tracked again after this many camera frames in a row at or above it. */
+export const TRACKING_FOUND_FRAMES = 3;
 
 /** Ball drawn this many times its physics radius, so it's readable from 2 m. */
 export const BALL_DRAW_SCALE = knobs.number({ name: 'BALL_DRAW_SCALE', min: 1, max: 4, step: 0.1, default: 2, group: 'Render' });

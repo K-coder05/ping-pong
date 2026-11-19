@@ -6,6 +6,11 @@
  * Feeder react (rally end, "3, 2, 1", next Feed), update debug mode, then
  * draw from whichever camera is active. Swings arrive between frames from the
  * active `SwingSource`; the game never knows whether that is pose or mouse.
+ *
+ * Without a URL flag, play is with your hand: the camera starts at load,
+ * Swings come only from pose, the Paddle follows the tracked wrist, and the
+ * Feeder pauses (with a "Can't see your hand" banner) while the hitting wrist
+ * can't be seen. `?input=mouse` swaps in the developer mouse for both.
  */
 import { createSounds, unlockAudioOnGesture } from './audio/sounds.ts';
 import { launchBall, simulate, stepBall, type BallEvent, type BallState } from './game/ball.ts';
@@ -33,7 +38,7 @@ import { createScore } from './game/score.ts';
 import { contactPoint, createShotResolver, feedResult, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { createSimClock } from './game/simClock.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
-import { installPoseInput } from './input/installPoseInput.ts';
+import { installPoseInput, startCamera } from './input/installPoseInput.ts';
 import { installMouseInput, swingInputMode, type MouseInput } from './input/mouseInput.ts';
 import { knobSwingParams } from './input/poseInput.ts';
 import type { SwingSource } from './input/types.ts';
@@ -51,7 +56,7 @@ const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
 knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
 installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
-const poseSwings = installPoseInput(knobs); // pose Swing detector (the camera starts from the overlay for now)
+const pose = installPoseInput(knobs); // pose Swings, wrist and tracking, once the camera is on
 const hud = createHud();
 
 /** The hitting hand: as saved, or right until the player is asked. */
@@ -71,15 +76,22 @@ const mouse: MouseInput | null =
     : null;
 
 /** The one SwingSource the game listens to: the mouse if on, otherwise pose. */
-const swings: SwingSource = mouse ?? poseSwings;
+const swings: SwingSource = mouse ?? pose;
+
+/** Where the hitting wrist is, for the Paddle to follow: the mouse if on, otherwise the tracked wrist. */
+const handPositions: HandPositionSource = mouse ?? pose;
 
 /**
- * Where the hitting wrist is, for the Paddle to follow: the mouse if on.
- * #13 plugs pose in here: replace `{ latest: null }` with pose's
- * HandPositionSource (a store set from each frame's SwingReading with
- * `handPositionFromReading`, cleared when the wrist is lost).
+ * Play with your hand needs the camera, so it starts at load. #14's
+ * onboarding will call `startCamera` from its camera-permission step instead.
+ * Until the camera is on and the hitting hand is known, the Feeder waits.
  */
-const handPositions: HandPositionSource = mouse ?? { latest: null };
+if (!mouse) startCamera().catch((error: unknown) => console.error('Camera failed to start', error));
+
+/** Whether the Feeder must wait for the player's hand: never with the mouse. */
+const waitingForHand = (): boolean => !mouse && pose.tracking !== 'tracked';
+/** Whether to show "Can't see your hand": once pose is running, while the wrist is lost. */
+const handLost = (): boolean => !mouse && pose.tracking === 'lost';
 
 /**
  * The one ball in play: at rest on the player's half until something launches
@@ -209,7 +221,10 @@ function frame(now: number): void {
   resolver.update(now, ball, ballEvents).forEach(handleShot);
 
   // The pause and "3, 2, 1" run on real time, capped like the simulation so a
-  // background tab doesn't fire a Feed the moment it comes back.
+  // background tab doesn't fire a Feed the moment it comes back. No new Feed
+  // while the hand can't be seen; a Feed in flight plays out.
+  feeder.setPaused(waitingForHand());
+  hud.showHandLost(handLost());
   feeder.update({ realSeconds: Math.min(elapsedSeconds, MAX_FRAME_DT), simSeconds: steps * PHYSICS_DT, nowMs: now }, ball);
   hud.showCountdown(feeder.countdown);
 

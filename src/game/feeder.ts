@@ -13,6 +13,12 @@
  * Return that replaces the Feed mid-rally needs no Feeder call. The rally ends
  * when that ball is no longer live (net, out) or has come to rest on the
  * table, but never before the Feed's Hit Window has closed.
+ *
+ * While paused (the player's hand can't be seen), it stays in `waiting` and
+ * sends nothing; a "3, 2, 1" in progress is cancelled. A Feed already in
+ * flight plays out as usual (Returned, or failed like any other), so tracking
+ * loss never changes a rally's outcome; only the next Feed waits. Resumed, it
+ * starts the wait and the cue over, giving the player time to get ready.
  */
 
 import { launchBall, simulate, type BallState, type Vec3 } from './ball.ts';
@@ -130,6 +136,16 @@ export interface Feeder {
    * shorter); a reset Streak restores the base pace.
    */
   setStreak(streak: number): void;
+  /** Whether the Feeder is paused (see `setPaused`). */
+  readonly paused: boolean;
+  /**
+   * Pause or resume the Feeder, e.g. while the player's hand can't be seen.
+   * Cheap to call every frame.
+   * Paused, it sends no new Feed and cancels a "3, 2, 1" in progress; a Feed
+   * in flight plays out. Resumed, it waits FEED_PAUSE_S and counts "3, 2, 1"
+   * again before the next one.
+   */
+  setPaused(paused: boolean): void;
   /** Called when a Feed launches. Returns an unsubscribe function. */
   onFeed(listener: (feed: Feed) => void): () => void;
   /**
@@ -160,6 +176,7 @@ export function createFeeder(options: FeederOptions = {}): Feeder {
   let currentFeed: Feed | null = null;
   let simSecondsSinceFeed = 0;
   let streak = 0;
+  let paused = false;
 
   function launch(nowMs: number): void {
     const speedUps = Math.floor(streak / FEED_SPEEDUP_EVERY);
@@ -198,6 +215,7 @@ export function createFeeder(options: FeederOptions = {}): Feeder {
         if (ballIsDone(ball) && !hitWindowIsOpen(currentFeed, frame.nowMs)) endRally(ball);
         return;
       }
+      if (paused) return;
       phaseSeconds += frame.realSeconds;
       if (phase === 'waiting' && phaseSeconds >= FEED_PAUSE_S.value) {
         phase = 'countdown';
@@ -209,6 +227,18 @@ export function createFeeder(options: FeederOptions = {}): Feeder {
     },
     setStreak(next) {
       streak = next;
+    },
+    get paused() {
+      return paused;
+    },
+    setPaused(next) {
+      if (next === paused) return;
+      paused = next;
+      // Between rallies, the wait and any "3, 2, 1" start over.
+      if (paused && phase !== 'feeding') {
+        phase = 'waiting';
+        phaseSeconds = 0;
+      }
     },
     onFeed(listener) {
       feedListeners.add(listener);

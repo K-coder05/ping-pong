@@ -219,6 +219,77 @@ describe('Feeder scheduling', () => {
   });
 });
 
+describe('Feeder pause (tracking loss)', () => {
+  it('sends no Feed while paused, however long, then waits and counts down again once resumed', () => {
+    const feeder = createFeeder({ random: seededRandom(6) });
+    const feeds: Feed[] = [];
+    feeder.onFeed((feed) => feeds.push(feed));
+    const game = driver(feeder);
+
+    feeder.setPaused(true);
+    game.run(10);
+    expect(feeds).toHaveLength(0);
+    expect(feeder.paused).toBe(true);
+    expect(feeder.countdown).toBeNull();
+
+    feeder.setPaused(false);
+    game.run(1.4);
+    expect(feeder.countdown).toBeNull();
+    game.run(0.2);
+    expect(feeder.countdown).toBe(3);
+    game.run(1.5);
+    expect(feeds).toHaveLength(1);
+  });
+
+  it('cancels a "3, 2, 1" in progress, and starts the wait over on resume', () => {
+    const feeder = createFeeder({ random: seededRandom(6) });
+    const feeds: Feed[] = [];
+    feeder.onFeed((feed) => feeds.push(feed));
+    const game = driver(feeder);
+    game.run(2.6);
+    expect(feeder.countdown).toBe(1);
+
+    feeder.setPaused(true);
+    expect(feeder.countdown).toBeNull();
+    game.run(1);
+    expect(feeds).toHaveLength(0);
+
+    feeder.setPaused(false);
+    game.run(1.4);
+    expect(feeder.phase).toBe('waiting');
+    expect(feeder.countdown).toBeNull();
+    game.run(0.2);
+    expect(feeder.countdown).toBe(3);
+  });
+
+  it('lets a Feed in flight play out, then sends no new one until resumed', () => {
+    const feeder = createFeeder({ random: seededRandom(6) });
+    const feeds: Feed[] = [];
+    let rallyEnds = 0;
+    feeder.onFeed((feed) => feeds.push(feed));
+    feeder.onRallyEnd(() => rallyEnds++);
+    const game = driver(feeder);
+    game.run(3.1);
+    expect(feeds).toHaveLength(1);
+
+    feeder.setPaused(true);
+    expect(feeder.phase).toBe('feeding');
+    expect(feeder.currentFeed).toBe(feeds[0]);
+    game.run(3); // past the Hit Window
+    game.setBall(OUT_BALL);
+    game.run(0.05);
+    expect(rallyEnds).toBe(1);
+
+    game.run(10);
+    expect(feeds).toHaveLength(1);
+    expect(feeder.countdown).toBeNull();
+
+    feeder.setPaused(false);
+    game.run(3.1);
+    expect(feeds).toHaveLength(2);
+  });
+});
+
 interface Rally {
   feed: Feed;
   /** Ball events while the ball was live. */

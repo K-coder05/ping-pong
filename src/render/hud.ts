@@ -1,7 +1,8 @@
 /**
  * The player's heads-up display, drawn as HTML over the canvas: the "3, 2, 1"
- * cue before each Feed, the Streak and best Streak, and short feedback such as
- * "Early!", "Late!" and "Miss". Sized to be read from 1.5–2 m away.
+ * cue before each Feed, the Streak and best Streak, short feedback such as
+ * "Early!", "Late!" and "Miss", and the "Can't see your hand" tracking-loss
+ * banner. Sized to be read from 1.5–2 m away.
  */
 export interface Hud {
   /** Show 3, 2 or 1 big in the middle of the screen; null hides it. Cheap to call every frame. */
@@ -10,6 +11,8 @@ export interface Hud {
   showStreak(streak: number, best: number): void;
   /** Flash a short message (e.g. "Early!") for a moment. */
   showFeedback(text: string): void;
+  /** Show or hide the "Can't see your hand" banner (SPEC "Tracking loss"). Cheap to call every frame. */
+  showHandLost(lost: boolean): void;
 }
 
 /** How long a feedback message stays up, ms. */
@@ -70,9 +73,31 @@ export function createHud(): Hud {
     transition: 'opacity 150ms ease-out',
   });
 
-  document.body.append(countdown, streak, feedback);
+  const handLost = document.createElement('div');
+  handLost.setAttribute('role', 'status');
+  handLost.textContent = "Can't see your hand";
+  Object.assign(handLost.style, {
+    position: 'fixed',
+    left: '50%',
+    top: '50%',
+    transform: 'translate(-50%, -50%)',
+    display: 'none', // 'block' while showing
+    padding: '0.4em 0.8em',
+    borderRadius: '0.4em',
+    background: 'rgba(12, 14, 20, 0.75)',
+    pointerEvents: 'none',
+    zIndex: '6',
+    color: '#ffffff',
+    font: `700 7vmin/1.2 ${FONT}`,
+    textShadow: SHADOW,
+    textAlign: 'center',
+    whiteSpace: 'nowrap',
+  });
+
+  document.body.append(countdown, streak, feedback, handLost);
 
   let shownCount: number | null = null;
+  let shownHandLost = false;
   let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
   return {
     showCountdown(count) {
@@ -90,6 +115,11 @@ export function createHud(): Hud {
       feedback.style.opacity = '1';
       clearTimeout(feedbackTimer);
       feedbackTimer = setTimeout(() => (feedback.style.opacity = '0'), FEEDBACK_MS);
+    },
+    showHandLost(lost) {
+      if (lost === shownHandLost) return;
+      shownHandLost = lost;
+      handLost.style.display = lost ? 'block' : 'none';
     },
   };
 }

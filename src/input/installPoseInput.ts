@@ -4,7 +4,9 @@ import { addOverlayExtension } from '../render/cameraOverlay.ts';
 import { askHandedness } from '../render/handednessPrompt.ts';
 import { createSwingOverlay } from '../render/swingOverlay.ts';
 import type { Sensing } from '../sensing/sensing.ts';
-import { onSharedSensingStarted } from '../sensing/shared.ts';
+import { onSharedSensingStarted, sharedSensing } from '../sensing/shared.ts';
+import type { HandPositionSource } from './handPosition.ts';
+import { createPoseHand, type PoseHand } from './poseHand.ts';
 import { createPoseInput } from './poseInput.ts';
 import { createSwingEmitter } from './swingEmitter.ts';
 import type { SwingSource } from './types.ts';
@@ -13,17 +15,42 @@ import type { SwingSource } from './types.ts';
 const DEFAULT_ASPECT = 4 / 3;
 
 /**
- * Adds pose Swing detection to the game page. Once the page's shared sensing
- * starts (debug overlay or game), it asks "Which hand holds the paddle?" if
- * no hand is saved, then turns frames into Swings and adds the stroke-speed
+ * Whether play can see the player's hitting hand: `starting` until the
+ * camera is on and the hitting hand is known, then `tracked` or `lost`
+ * (SPEC "Tracking loss").
+ */
+export type HandTracking = 'starting' | 'tracked' | 'lost';
+
+/** Pose input for the game: Swings, the wrist the Paddle follows, and whether it can be seen. */
+export interface InstalledPoseInput extends SwingSource, HandPositionSource {
+  readonly tracking: HandTracking;
+}
+
+/**
+ * Start the camera (permission prompt, pose model download) so the player can
+ * play with their hand. This is the one place play starts it; the debug
+ * overlay may start the same shared sensing sooner. Rejects if the camera or
+ * model can't start (e.g. permission denied); calling again retries.
+ */
+export function startCamera(): Promise<void> {
+  return sharedSensing().then(() => undefined);
+}
+
+/**
+ * Adds pose input to the game page. Once the page's shared sensing starts
+ * (`startCamera`, or the debug overlay), it asks "Which hand holds the
+ * paddle?" if no hand is saved, then turns frames into Swings, tracks the
+ * hitting wrist for the Paddle and tracking loss, and adds the stroke-speed
  * bar, Onset flash and CSV columns to the camera overlay. The debug panel's
  * Swing group gets an "Ask handedness" button to change hands.
  *
- * Returns a `SwingSource` usable right away; it emits once sensing has
- * started and the hand is known.
+ * Returns right away; it emits Swings and has a wrist position once sensing
+ * has started and the hand is known. It never starts the camera itself.
  */
-export function installPoseInput(registry: KnobRegistry): SwingSource {
+export function installPoseInput(registry: KnobRegistry): InstalledPoseInput {
   const swings = createSwingEmitter();
+  /** The tracked hitting wrist, once sensing has started and the hand is known. */
+  let wrist: PoseHand | null = null;
   const report = (error: unknown) => console.error('Handedness prompt failed', error);
 
   registry.button({
@@ -45,10 +72,20 @@ export function installPoseInput(registry: KnobRegistry): SwingSource {
       },
     });
     input.subscribe(swings.emit);
+    wrist = createPoseHand(sensing, input);
     addOverlayExtension(createSwingOverlay(input));
   }
 
   onSharedSensingStarted((sensing) => void start(sensing).catch(report));
 
-  return { subscribe: swings.subscribe };
+  return {
+    subscribe: swings.subscribe,
+    get latest() {
+      return wrist?.latest ?? null;
+    },
+    get tracking() {
+      if (!wrist) return 'starting';
+      return wrist.tracked ? 'tracked' : 'lost';
+    },
+  };
 }
