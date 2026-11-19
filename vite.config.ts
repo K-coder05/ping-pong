@@ -9,8 +9,8 @@ export default defineConfig({
   base: './',
   build: {
     rollupOptions: {
-      // The game plus the latency harness page (dist/latency.html, not linked from the game).
-      input: { main: resolve(import.meta.dirname, 'index.html'), latency: resolve(import.meta.dirname, 'latency.html') },
+      // The game plus the tool pages (dist/latency.html, dist/detection.html; not linked from the game).
+      input: { main: resolve(import.meta.dirname, 'index.html'), latency: resolve(import.meta.dirname, 'latency.html'), detection: resolve(import.meta.dirname, 'detection.html') },
     },
   },
   test: {
