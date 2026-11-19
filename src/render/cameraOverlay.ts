@@ -1,9 +1,11 @@
+import { TRACKING_MIN_VISIBILITY } from '../game/constants.ts';
 import type { KnobRegistry } from '../game/knobs.ts';
 import { parkVideo } from '../sensing/camera.ts';
 import { createFrameLog, type CsvRow, type FrameLog } from '../sensing/frameLog.ts';
-import { LANDMARK, TRACKED_LANDMARKS, type Point2 } from '../sensing/landmarks.ts';
+import { LANDMARK, sideOf, TRACKED_LANDMARKS, type Point2 } from '../sensing/landmarks.ts';
 import type { Sensing } from '../sensing/sensing.ts';
 import { frameLogRow, type SensingFrame } from '../sensing/sensingFrame.ts';
+import { onSharedSensingStarted, sharedSensing } from '../sensing/shared.ts';
 
 /**
  * Camera + pose debug overlay (SPEC "Debug overlay"): mirrored video, a dot
@@ -12,9 +14,9 @@ import { frameLogRow, type SensingFrame } from '../sensing/sensingFrame.ts';
  * per-frame log.
  *
  * Open it from the debug panel (`D` → Camera → "Camera overlay") or load the
- * page with `?overlay`. The camera is only requested the first time it opens.
- * Once sensing has started, every frame is logged, even while the overlay is
- * hidden, so you can play and download the log afterwards.
+ * page with `?overlay`. The camera is only requested the first time it opens
+ * (or when the game starts sensing). From then on every frame is logged, even
+ * while the overlay is hidden, so you can play and download the log after.
  */
 
 /** What an extension gets to draw with, once per frame while the overlay is visible. */
@@ -39,26 +41,36 @@ export interface OverlayExtension {
   logFields?(frame: SensingFrame): CsvRow;
 }
 
+const extensions = new Set<OverlayExtension>();
+
+/**
+ * Add a debug layer to the camera overlay. Works before or after the overlay
+ * is installed. Returns a function that removes it.
+ */
+export function addOverlayExtension(extension: OverlayExtension): () => void {
+  extensions.add(extension);
+  return () => void extensions.delete(extension);
+}
+
 export interface CameraOverlay {
   readonly visible: boolean;
   /** Show the overlay, starting sensing (camera permission prompt) if needed. */
   show(): Promise<void>;
   hide(): void;
   toggle(): Promise<void>;
-  addExtension(extension: OverlayExtension): () => void;
   readonly log: FrameLog;
 }
 
 const TRAIL_LENGTH = 10;
-const VISIBLE = 0.5; // SPEC tracking-loss threshold
 const READOUT_INTERVAL_MS = 250;
 
 const COLOR = {
   hitting: '#ff9f43',
   other: '#4fc3f7',
   wrist: '#ffe14d',
-  trail: '255, 225, 77',
 } as const;
+/** The wrist colour's RGB channels, for the fading trail. */
+const TRAIL_RGB = '255, 225, 77';
 
 const STYLE = `
 .camera-overlay {
@@ -79,7 +91,12 @@ const STYLE = `
 .camera-overlay button { font: inherit; }
 `;
 
-export function createCameraOverlay(getSensing: () => Promise<Sensing>): CameraOverlay {
+/**
+ * Builds the (hidden) overlay. `startSensing` is called when it is shown;
+ * call `attach` with any sensing instance that starts, so its frames are
+ * logged even if the overlay never opens.
+ */
+export function createCameraOverlay(startSensing: () => Promise<Sensing>): CameraOverlay & { attach(sensing: Sensing): void } {
   const style = document.createElement('style');
   style.textContent = STYLE;
   document.head.append(style);
@@ -104,10 +121,8 @@ export function createCameraOverlay(getSensing: () => Promise<Sensing>): CameraO
   if (!ctx) throw new Error('2D canvas unavailable');
 
   const log = createFrameLog();
-  const extensions = new Set<OverlayExtension>();
   const trail: Point2[] = [];
   let sensing: Sensing | null = null;
-  let starting: Promise<Sensing> | null = null;
   let lastReadout = -Infinity;
 
   actions.append(
@@ -155,18 +170,18 @@ export function createCameraOverlay(getSensing: () => Promise<Sensing>): CameraO
     for (const name of TRACKED_LANDMARKS) {
       const landmark = frame.landmarks?.[LANDMARK[name]];
       if (!landmark) continue;
-      const color = name.startsWith(frame.hand) ? COLOR.hitting : COLOR.other;
-      dot(toCanvas(landmark), 5, color, landmark.visibility >= VISIBLE);
+      const color = sideOf(name) === frame.hand ? COLOR.hitting : COLOR.other;
+      dot(toCanvas(landmark), 5, color, landmark.visibility >= TRACKING_MIN_VISIBILITY);
     }
 
     trail.forEach((point, i) => {
-      ctx.fillStyle = `rgba(${COLOR.trail}, ${((i + 1) / trail.length) * 0.6})`;
+      ctx.fillStyle = `rgba(${TRAIL_RGB}, ${((i + 1) / trail.length) * 0.6})`;
       const p = toCanvas(point);
       ctx.beginPath();
       ctx.arc(p.x, p.y, 3 + i * 0.3, 0, Math.PI * 2);
       ctx.fill();
     });
-    if (frame.wrist) dot(toCanvas(frame.wrist), 8, COLOR.wrist, frame.wristVisibility >= VISIBLE);
+    if (frame.wrist) dot(toCanvas(frame.wrist), 8, COLOR.wrist, frame.wristVisibility >= TRACKING_MIN_VISIBILITY);
 
     for (const extension of extensions) extension.draw?.({ ctx, width, height, frame, toCanvas });
   }
@@ -184,43 +199,35 @@ export function createCameraOverlay(getSensing: () => Promise<Sensing>): CameraO
   }
 
   function readoutText(frame: SensingFrame): string {
-    const fmt = (n: number | null, digits = 1) => (n === null ? '–' : n.toFixed(digits));
+    const fmt = (n: number | null) => (n === null ? '–' : n.toFixed(1));
+    const lost = frame.wristVisibility < TRACKING_MIN_VISIBILITY ? ' (lost)' : '';
     return [
       `camera ${fmt(frame.cameraFps)} fps · pose ${fmt(frame.poseFps)} fps`,
-      `inference ${frame.inferenceMs.toFixed(1)} ms (${sensing?.delegate ?? '?'}) · t from ${frame.timeSource}`,
-      `${frame.hand} wrist visibility ${frame.wristVisibility.toFixed(2)}${frame.wristVisibility < VISIBLE ? ' LOW' : ''}`,
+      `inference ${fmt(frame.meanInferenceMs)} ms avg (${sensing?.delegate ?? '?'}) · capture→result ${fmt(frame.processedAt - frame.t)} ms`,
+      `${frame.hand} wrist visibility ${frame.wristVisibility.toFixed(2)}${lost} · t from ${frame.timeSource}`,
       `log ${log.length} frames`,
     ].join('\n');
   }
 
-  async function ensureSensing(): Promise<Sensing> {
-    if (sensing) return sensing;
-    starting ??= getSensing();
-    try {
-      const started = await starting;
-      if (!sensing) {
-        sensing = started;
-        sensing.subscribe(onFrame);
-      }
-      return sensing;
-    } finally {
-      starting = null;
-    }
-  }
-
-  const overlay: CameraOverlay = {
+  const overlay = {
     get visible() {
       return !root.hidden;
+    },
+    attach(next: Sensing) {
+      if (sensing === next) return;
+      sensing = next;
+      next.subscribe(onFrame);
     },
     async show() {
       root.hidden = false;
       status.textContent = sensing ? '' : 'Starting camera and pose model… (video stays on this device)';
       try {
-        const s = await ensureSensing();
+        const started = await startSensing();
+        overlay.attach(started);
         status.textContent = '';
         if (root.hidden) return; // closed while starting
-        s.video.style.cssText = '';
-        stage.prepend(s.video);
+        started.video.style.cssText = '';
+        stage.prepend(started.video);
       } catch (error) {
         status.textContent = `Camera unavailable: ${error instanceof Error ? error.message : String(error)}`;
         throw error;
@@ -234,10 +241,6 @@ export function createCameraOverlay(getSensing: () => Promise<Sensing>): CameraO
       if (root.hidden) return overlay.show();
       overlay.hide();
       return Promise.resolve();
-    },
-    addExtension(extension) {
-      extensions.add(extension);
-      return () => void extensions.delete(extension);
     },
     log,
   };
@@ -258,16 +261,17 @@ function downloadCsv(log: FrameLog): void {
   link.href = url;
   link.download = `sensing-log-${new Date().toISOString().replaceAll(':', '-')}.csv`;
   link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 /**
  * Adds the overlay to the game page: a "Camera overlay" button in the debug
- * panel's Camera group, and `?overlay` in the URL to open it on load.
- * Sensing (and MediaPipe) is loaded lazily the first time it opens.
+ * panel's Camera group, and `?overlay` in the URL to open it on load. It logs
+ * frames from the page's shared sensing as soon as anything starts it.
  */
 export function installCameraOverlay(registry: KnobRegistry): CameraOverlay {
-  const overlay = createCameraOverlay(async () => (await import('../sensing/sensing.ts')).sharedSensing());
+  const overlay = createCameraOverlay(sharedSensing);
+  onSharedSensingStarted((sensing) => overlay.attach(sensing));
   const report = (error: unknown) => console.error('Camera overlay failed to start', error);
   registry.button({ name: 'Camera overlay', group: 'Camera', onPress: () => void overlay.toggle().catch(report) });
   if (new URLSearchParams(window.location.search).has('overlay')) void overlay.show().catch(report);

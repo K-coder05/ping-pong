@@ -3,7 +3,7 @@
  * MediaPipe's left/right is the *person's* side, not the image's.
  */
 
-/** Which hand holds the paddle. */
+/** The player's hitting hand. */
 export type Hand = 'left' | 'right';
 
 /** A point in normalized image coordinates: x, y in 0..1 from the top-left of the *unmirrored* camera frame. */
@@ -35,6 +35,11 @@ export const LANDMARK = {
 } as const;
 
 export type LandmarkName = keyof typeof LANDMARK;
+
+/** The body side a tracked landmark is on (the person's own side). */
+export function sideOf(name: LandmarkName): Hand {
+  return name.startsWith('left') ? 'left' : 'right';
+}
 
 /** The landmarks the game tracks (SPEC "Landmarks you need"), drawn by the debug overlay. */
 export const TRACKED_LANDMARKS: readonly LandmarkName[] = Object.keys(LANDMARK) as LandmarkName[];

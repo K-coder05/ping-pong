@@ -23,7 +23,7 @@ export interface FrameStats {
   readonly cameraFps: number | null;
   /** Frames actually run through pose inference per second, or null. */
   readonly poseFps: number | null;
-  /** Mean inference time over the window, ms, or null before the first frame. */
+  /** Mean inference time over the window, ms, or null before any frame. */
   readonly inferenceMs: number | null;
 }
 

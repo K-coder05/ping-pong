@@ -1,3 +1,4 @@
+import type { TimeSource } from './camera.ts';
 import type { CsvRow } from './frameLog.ts';
 import { hittingSide, type Hand, type PoseLandmark } from './landmarks.ts';
 import type { SmoothedPose } from './poseSmoother.ts';
@@ -17,19 +18,22 @@ export interface SensingFrame extends SmoothedPose {
    * comparing against game time.
    */
   t: number;
-  /**
-   * Where `t` came from: `'capture'` is the browser's capture timestamp
-   * (`requestVideoFrameCallback` `metadata.captureTime`); `'presentation'` is
-   * the fallback when the browser omits it (`metadata.presentationTime`, a
-   * little later than capture).
-   */
-  timeSource: 'capture' | 'presentation';
+  /** Which `requestVideoFrameCallback` timestamp `t` came from (see `TimeSource`). */
+  timeSource: TimeSource;
   /** The hitting hand the wrist and shoulders were picked for. */
   hand: Hand;
   /** All 33 raw (unsmoothed) MediaPipe landmarks, or null when no pose was found. */
   landmarks: readonly PoseLandmark[] | null;
   /** Wall time `detectForVideo` took for this frame, ms. */
   inferenceMs: number;
+  /** Mean `inferenceMs` over the last ~second, ms. */
+  meanInferenceMs: number;
+  /**
+   * When this frame's result was ready (end of `detectForVideo` and
+   * smoothing), ms on the `performance.now()` clock. `processedAt - t` is the
+   * capture-to-result delay (SPEC "Latency harness" step 5).
+   */
+  processedAt: number;
   /** Real camera frame rate over the last ~second, or null at start. */
   cameraFps: number | null;
   /** Frames per second that went through pose inference, or null at start. */
@@ -47,11 +51,12 @@ export function frameLogRow(frame: SensingFrame): CsvRow {
     wristRawY: rawWrist?.y ?? null,
     wristX: frame.wrist?.x ?? null,
     wristY: frame.wrist?.y ?? null,
-    hitShoulderX: frame.hittingShoulder?.x ?? null,
-    hitShoulderY: frame.hittingShoulder?.y ?? null,
+    hittingShoulderX: frame.hittingShoulder?.x ?? null,
+    hittingShoulderY: frame.hittingShoulder?.y ?? null,
     otherShoulderX: frame.otherShoulder?.x ?? null,
     otherShoulderY: frame.otherShoulder?.y ?? null,
     inferenceMs: frame.inferenceMs,
+    captureToResultMs: frame.processedAt - frame.t,
     cameraFps: frame.cameraFps,
     poseFps: frame.poseFps,
   };

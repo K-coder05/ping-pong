@@ -2,9 +2,12 @@ import { hittingSide, type Hand, type Point2, type PoseLandmark } from './landma
 import { createOneEuroFilter, type OneEuroParams } from './oneEuro.ts';
 
 /**
- * Picks the hitting wrist and both shoulders out of one frame's landmarks and
- * One-Euro-smooths each coordinate (SPEC "Smoothing: One Euro filter").
+ * Pose smoother: picks the hitting wrist and both shoulders out of one
+ * frame's landmarks and One-Euro-smooths each coordinate (SPEC "Smoothing:
+ * One Euro filter").
  */
+
+/** The smoothed hitting-side points of one frame. */
 export interface SmoothedPose {
   /** Smoothed hitting wrist, or null when no pose was found this frame. */
   wrist: Point2 | null;
@@ -42,25 +45,31 @@ export function createPoseSmoother(options: { params: () => OneEuroParams; hand:
     },
     update(t, landmarks) {
       const side = hittingSide(hand);
-      const w = landmarks?.[side.wrist];
-      const h = landmarks?.[side.hittingShoulder];
-      const o = landmarks?.[side.otherShoulder];
-      if (!w || !h || !o) {
+      const rawWrist = landmarks?.[side.wrist];
+      const rawHitting = landmarks?.[side.hittingShoulder];
+      const rawOther = landmarks?.[side.otherShoulder];
+      if (!rawWrist || !rawHitting || !rawOther) {
         // Lost: the next pose may be anywhere, so don't drag it from here.
         resetAll();
         return { wrist: null, hittingShoulder: null, otherShoulder: null, wristVisibility: 0 };
       }
       return {
-        wrist: wrist.filter(t, w),
-        hittingShoulder: hittingShoulder.filter(t, h),
-        otherShoulder: otherShoulder.filter(t, o),
-        wristVisibility: w.visibility,
+        wrist: wrist.filter(t, rawWrist),
+        hittingShoulder: hittingShoulder.filter(t, rawHitting),
+        otherShoulder: otherShoulder.filter(t, rawOther),
+        wristVisibility: rawWrist.visibility,
       };
     },
   };
 }
 
-function createPointFilter(params: () => OneEuroParams) {
+/** One Euro filters for the x and y of one point. */
+interface PointFilter {
+  filter(t: number, point: PoseLandmark): Point2;
+  reset(): void;
+}
+
+function createPointFilter(params: () => OneEuroParams): PointFilter {
   const x = createOneEuroFilter(params);
   const y = createOneEuroFilter(params);
   return {

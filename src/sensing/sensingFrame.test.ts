@@ -15,12 +15,14 @@ const frame: SensingFrame = {
   otherShoulder: { x: 0.6, y: 0.41 },
   wristVisibility: 0.97,
   inferenceMs: 11.2,
+  meanInferenceMs: 12,
+  processedAt: 12395.25,
   cameraFps: 30,
   poseFps: 29.5,
 };
 
 describe('sensing frame log row', () => {
-  it('logs time, raw and smoothed hitting wrist, shoulders, visibility and timing', () => {
+  it('logs time, raw and smoothed hitting wrist, shoulders, visibility, inference cost and capture-to-result time', () => {
     expect(frameLogRow(frame)).toEqual({
       t: 12345.5,
       hand: 'right',
@@ -29,11 +31,12 @@ describe('sensing frame log row', () => {
       wristRawY: 0.62,
       wristX: 0.3,
       wristY: 0.6,
-      hitShoulderX: 0.4,
-      hitShoulderY: 0.4,
+      hittingShoulderX: 0.4,
+      hittingShoulderY: 0.4,
       otherShoulderX: 0.6,
       otherShoulderY: 0.41,
       inferenceMs: 11.2,
+      captureToResultMs: 49.75,
       cameraFps: 30,
       poseFps: 29.5,
     });

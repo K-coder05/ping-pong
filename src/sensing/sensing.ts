@@ -2,19 +2,24 @@ import { ONE_EURO_BETA, ONE_EURO_MIN_CUTOFF } from '../game/constants.ts';
 import { openCamera } from './camera.ts';
 import { createFrameStats } from './frameStats.ts';
 import type { Hand } from './landmarks.ts';
-import type { OneEuroParams } from './oneEuro.ts';
 import { loadPoseModel, type Delegate } from './pose.ts';
 import { createPoseSmoother } from './poseSmoother.ts';
 import type { SensingFrame } from './sensingFrame.ts';
 
 /**
- * Sensing: camera → pose inference → smoothing, once per new camera frame,
- * outside the render loop. Consumers subscribe to `SensingFrame`s or read
- * `latest` from their own loop; they never touch the camera or MediaPipe.
+ * Sensing: camera → pose inference → smoothing, once per new camera frame.
+ * Consumers subscribe to `SensingFrame`s or read `latest` from their own
+ * loop; they never touch the camera or MediaPipe.
  *
- * Inference runs synchronously on the main thread inside the camera's frame
- * callback (not in requestAnimationFrame), so the render loop never waits on
- * it. If that ever stutters rendering, move it to a Web Worker (SPEC).
+ * Inference is driven by the camera's frame callback, not by the render
+ * loop: the game loop never calls or awaits it and simply reads the newest
+ * frame. It does still run synchronously on the main thread, so a slow
+ * `detectForVideo` delays the browser frame it lands in (see `inferenceMs`).
+ * If that visibly stutters rendering, move inference to a Web Worker (SPEC).
+ *
+ * Within the game page, use `sharedSensing()` from `shared.ts` so the
+ * camera opens once; a separate page (e.g. the latency harness) may call
+ * `startSensing()` directly.
  */
 export interface Sensing {
   /** The live, unmirrored camera video (see `Camera.video` for showing it). */
@@ -35,11 +40,7 @@ export interface Sensing {
 export interface SensingOptions {
   /** Hitting hand; default right until the handedness prompt exists. */
   hand?: Hand;
-  /** One Euro parameters, read every frame; default reads the live knobs. */
-  oneEuro?: () => OneEuroParams;
 }
-
-const knobParams = (): OneEuroParams => ({ minCutoff: ONE_EURO_MIN_CUTOFF.value, beta: ONE_EURO_BETA.value });
 
 /** Asks for the camera, loads the pose model, and starts emitting frames. */
 export async function startSensing(options: SensingOptions = {}): Promise<Sensing> {
@@ -52,7 +53,10 @@ export async function startSensing(options: SensingOptions = {}): Promise<Sensin
   }
   const camera = cameraResult.value;
   const model = modelResult.value;
-  const smoother = createPoseSmoother({ params: options.oneEuro ?? knobParams, hand: options.hand ?? 'right' });
+  const smoother = createPoseSmoother({
+    params: () => ({ minCutoff: ONE_EURO_MIN_CUTOFF.value, beta: ONE_EURO_BETA.value }), // live knobs
+    hand: options.hand ?? 'right',
+  });
   const stats = createFrameStats();
   const listeners = new Set<(frame: SensingFrame) => void>();
   let latest: SensingFrame | null = null;
@@ -62,13 +66,16 @@ export async function startSensing(options: SensingOptions = {}): Promise<Sensin
     const landmarks = model.detect(camera.video, t);
     const inferenceMs = performance.now() - started;
     stats.record({ t, inferenceMs, presentedFrames });
+    const smoothed = smoother.update(t, landmarks);
     const frame: SensingFrame = {
       t,
       timeSource,
       hand: smoother.hand,
       landmarks,
-      ...smoother.update(t, landmarks),
+      ...smoothed,
       inferenceMs,
+      meanInferenceMs: stats.inferenceMs ?? inferenceMs,
+      processedAt: performance.now(),
       cameraFps: stats.cameraFps,
       poseFps: stats.poseFps,
     };
@@ -104,19 +111,4 @@ export async function startSensing(options: SensingOptions = {}): Promise<Sensin
       listeners.clear();
     },
   };
-}
-
-let shared: Promise<Sensing> | null = null;
-
-/**
- * The page-wide sensing instance, started on first call. The debug overlay
- * and the game share it so the camera is opened once. If starting fails
- * (e.g. permission denied), the next call tries again.
- */
-export function sharedSensing(): Promise<Sensing> {
-  shared ??= startSensing().catch((error: unknown) => {
-    shared = null;
-    throw error;
-  });
-  return shared;
 }

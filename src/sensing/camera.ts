@@ -4,6 +4,14 @@
  * processed exactly once and never inside the render loop.
  */
 
+/**
+ * Which rVFC timestamp a frame time came from: `'capture'` is
+ * `metadata.captureTime` (when the camera captured it); `'presentation'` is
+ * the fallback `metadata.presentationTime` when the browser omits capture
+ * time (a little later than capture).
+ */
+export type TimeSource = 'capture' | 'presentation';
+
 export interface CameraFrame {
   /**
    * When the camera captured the frame, ms on the `performance.now()` clock:
@@ -11,7 +19,7 @@ export interface CameraFrame {
    * `metadata.presentationTime` (see `timeSource`).
    */
   t: number;
-  timeSource: 'capture' | 'presentation';
+  timeSource: TimeSource;
   /** Running count of frames the video element has shown, including ones no callback saw. */
   presentedFrames: number;
 }
@@ -56,7 +64,13 @@ export async function openCamera(): Promise<Camera> {
   video.playsInline = true;
   video.srcObject = stream;
   parkVideo(video);
-  await video.play();
+  try {
+    await video.play();
+  } catch (error) {
+    for (const track of stream.getTracks()) track.stop();
+    video.remove();
+    throw error;
+  }
 
   let handle: number | null = null;
   let onFrame: ((frame: CameraFrame) => void) | null = null;
