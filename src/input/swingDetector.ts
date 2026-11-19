@@ -1,4 +1,3 @@
-import type { Point2 } from '../sensing/landmarks.ts';
 import type { SwingEvent } from './types.ts';
 
 /**
@@ -14,13 +13,22 @@ import type { SwingEvent } from './types.ts';
  * aspect ratio before calling `update`.
  */
 
+/**
+ * A point or vector in any coordinates with the same scale on both axes
+ * (unlike MediaPipe's normalized `Point2`), y pointing down as in images.
+ */
+export interface Vec2 {
+  x: number;
+  y: number;
+}
+
 /** One camera frame's hitting-side points. */
 export interface SwingDetectorInput {
   /** Capture time, ms. Velocities use real frame-to-frame time. */
   t: number;
-  wrist: Point2 | null;
-  hittingShoulder: Point2 | null;
-  otherShoulder: Point2 | null;
+  wrist: Vec2 | null;
+  hittingShoulder: Vec2 | null;
+  otherShoulder: Vec2 | null;
 }
 
 /** Live thresholds, read every frame (knobs). */
@@ -37,7 +45,7 @@ export interface SwingParams {
 export interface SwingReading {
   t: number;
   /** Normalized wrist position, (wrist − midline) / shoulder width. */
-  p: Point2;
+  p: Vec2;
   /** Wrist position along the body axis, shoulder widths; > 0 on the hitting side. */
   u: number;
   side: SwingEvent['side'];
@@ -66,11 +74,11 @@ export interface SwingDetector {
 const ONSET_FRAMES = 2;
 /** `peakSpeed` is the max total speed over this many frames. */
 const PEAK_FRAMES = 3;
-/** Shoulders closer than this (in input units) give no usable body scale. */
+/** Shoulders closer than this (in input units) give no body scale at all; callers set a practical floor. */
 const MIN_SHOULDER_WIDTH = 1e-6;
 
 export function createSwingDetector(params: () => SwingParams): SwingDetector {
-  let prev: { t: number; p: Point2 } | null = null;
+  let prev: { t: number; p: Vec2 } | null = null;
   let recentSpeeds: number[] = [];
   let framesOverThreshold = 0;
   let armed = true;

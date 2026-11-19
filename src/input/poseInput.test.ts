@@ -92,6 +92,21 @@ describe('pose input', () => {
     expect(reading?.vertSpeed).toBeCloseTo(-0.15 * 30);
   });
 
+  it('treats a player turned side-on (shoulders almost overlapping) as not tracked, rather than measuring huge speeds', () => {
+    const sensing = fakeSensing();
+    const input = createPoseInput(sensing, { params, aspect: () => 1 });
+    const swings: SwingEvent[] = [];
+    input.subscribe((swing) => swings.push(swing));
+    const sideOn = (i: number, x: number): SensingFrame => ({ ...frame(i, { x, y: 0.5 }), hittingShoulder: { x: 0.5, y: 0.4 }, otherShoulder: { x: 0.51, y: 0.4 } });
+    // A small wrist wobble is 30+ shoulder widths/s when the shoulders are 0.01 apart.
+    const frames = [0.3, 0.29, 0.28, 0.27].map((x, i) => sideOn(i, x));
+    for (const f of frames) {
+      sensing.emit(f);
+      expect(input.read(f)).toBeNull();
+    }
+    expect(swings).toEqual([]);
+  });
+
   it('stops listening to sensing when stopped', () => {
     const sensing = fakeSensing();
     const input = createPoseInput(sensing, { params, aspect: () => 1 });

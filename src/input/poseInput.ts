@@ -1,8 +1,9 @@
 import { SWING_COOLDOWN_MS, SWING_OFF, SWING_ON } from '../game/constants.ts';
 import type { Hand, Point2 } from '../sensing/landmarks.ts';
 import type { SensingFrame } from '../sensing/sensingFrame.ts';
-import { createSwingDetector, type SwingParams, type SwingReading } from './swingDetector.ts';
-import type { SwingEvent, SwingSource } from './types.ts';
+import { createSwingDetector, type SwingParams, type SwingReading, type Vec2 } from './swingDetector.ts';
+import { createSwingEmitter } from './swingEmitter.ts';
+import type { SwingSource } from './types.ts';
 
 /**
  * Pose input: sensing frames → Swing detector → `SwingEvent`s. The game
@@ -33,16 +34,26 @@ export interface PoseInputOptions {
   params?: () => SwingParams;
   /**
    * Video width / height. MediaPipe normalizes x by width and y by height,
-   * so x is stretched by this to make distances true.
+   * so x is stretched by this to make distances true (in units of image
+   * height). The detector's readings, and so the CSV's px/py, are in these
+   * true proportions, not raw normalized coordinates.
    */
   aspect: () => number;
 }
+
+/**
+ * Shoulders closer than this (in units of image height) mean the player is
+ * turned almost side-on: a player at 2 m is about 0.15–0.25 wide. Dividing by
+ * such a tiny width would turn any wrist wobble into a fast Swing, so the
+ * frame counts as not tracked.
+ */
+const MIN_SHOULDER_WIDTH = 0.04;
 
 const knobParams = (): SwingParams => ({ swingOn: SWING_ON.value, swingOff: SWING_OFF.value, cooldownMs: SWING_COOLDOWN_MS.value });
 
 export function createPoseInput(sensing: FrameSource, options: PoseInputOptions): PoseInput {
   const detector = createSwingDetector(options.params ?? knobParams);
-  const listeners = new Set<(swing: SwingEvent) => void>();
+  const swings = createSwingEmitter();
   let hand: Hand | null = null;
 
   function read(frame: SensingFrame): SwingReading | null {
@@ -51,22 +62,17 @@ export function createPoseInput(sensing: FrameSource, options: PoseInputOptions)
       detector.reset();
     }
     const aspect = options.aspect();
-    const stretch = (p: Point2 | null): Point2 | null => (p ? { x: p.x * aspect, y: p.y } : null);
+    const stretch = (p: Point2 | null): Vec2 | null => (p ? { x: p.x * aspect, y: p.y } : null);
+    const H = stretch(frame.hittingShoulder);
+    const N = stretch(frame.otherShoulder);
+    const sideOn = H && N && Math.hypot(H.x - N.x, H.y - N.y) < MIN_SHOULDER_WIDTH;
     const swing = detector.update({
       t: frame.t,
       wrist: stretch(frame.wrist),
-      hittingShoulder: stretch(frame.hittingShoulder),
-      otherShoulder: stretch(frame.otherShoulder),
+      hittingShoulder: sideOn ? null : H,
+      otherShoulder: sideOn ? null : N,
     });
-    if (swing) {
-      for (const listener of listeners) {
-        try {
-          listener(swing);
-        } catch (error) {
-          console.error('Swing listener failed', error);
-        }
-      }
-    }
+    if (swing) swings.emit(swing);
     // A repeated frame is ignored by the detector, and reads back the same reading.
     return detector.latest?.t === frame.t ? detector.latest : null;
   }
@@ -76,9 +82,6 @@ export function createPoseInput(sensing: FrameSource, options: PoseInputOptions)
   return {
     read,
     stop: unsubscribe,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => void listeners.delete(listener);
-    },
+    subscribe: swings.subscribe,
   };
 }

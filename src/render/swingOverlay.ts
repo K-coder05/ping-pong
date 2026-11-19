@@ -24,9 +24,9 @@ const COLOR = {
   backhand: '79, 195, 247',
 } as const;
 
-export function createSwingOverlay(input: PoseInput): OverlayExtension & { stop(): void } {
+export function createSwingOverlay(input: PoseInput): OverlayExtension {
   let lastSwing: SwingEvent | null = null;
-  const unsubscribe = input.subscribe((swing) => (lastSwing = swing));
+  input.subscribe((swing) => (lastSwing = swing));
 
   function drawBar({ ctx, width, frame }: OverlayView): void {
     const reading = input.read(frame);
@@ -86,6 +86,7 @@ export function createSwingOverlay(input: PoseInput): OverlayExtension & { stop(
       drawBar(view);
       drawFlash(view);
     },
+    /** px/py are in shoulder widths from the midline, in true proportions (see `PoseInputOptions.aspect`). */
     logFields(frame) {
       const reading = input.read(frame);
       return {
@@ -99,6 +100,5 @@ export function createSwingOverlay(input: PoseInput): OverlayExtension & { stop(
         onset: reading ? (reading.swing ? 1 : 0) : null,
       };
     },
-    stop: unsubscribe,
   };
 }

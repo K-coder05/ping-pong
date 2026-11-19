@@ -6,7 +6,8 @@ import { createSwingOverlay } from '../render/swingOverlay.ts';
 import type { Sensing } from '../sensing/sensing.ts';
 import { onSharedSensingStarted } from '../sensing/shared.ts';
 import { createPoseInput } from './poseInput.ts';
-import type { SwingEvent, SwingSource } from './types.ts';
+import { createSwingEmitter } from './swingEmitter.ts';
+import type { SwingSource } from './types.ts';
 
 /** Used until the video reports its size: the 640×480 the camera asks for. */
 const DEFAULT_ASPECT = 4 / 3;
@@ -22,7 +23,7 @@ const DEFAULT_ASPECT = 4 / 3;
  * started and the hand is known.
  */
 export function installPoseInput(registry: KnobRegistry): SwingSource {
-  const listeners = new Set<(swing: SwingEvent) => void>();
+  const swings = createSwingEmitter();
   const report = (error: unknown) => console.error('Handedness prompt failed', error);
 
   registry.button({
@@ -43,16 +44,11 @@ export function installPoseInput(registry: KnobRegistry): SwingSource {
         return videoWidth && videoHeight ? videoWidth / videoHeight : DEFAULT_ASPECT;
       },
     });
-    input.subscribe((swing) => listeners.forEach((listener) => listener(swing)));
+    input.subscribe(swings.emit);
     addOverlayExtension(createSwingOverlay(input));
   }
 
   onSharedSensingStarted((sensing) => void start(sensing).catch(report));
 
-  return {
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => void listeners.delete(listener);
-    },
-  };
+  return { subscribe: swings.subscribe };
 }

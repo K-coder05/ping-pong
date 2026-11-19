@@ -52,7 +52,13 @@ export function createHandednessStore(storage: () => KeyValueStorage | null): Ha
       }
       if (next === hand) return;
       hand = next;
-      for (const listener of listeners) listener(next);
+      for (const listener of listeners) {
+        try {
+          listener(next);
+        } catch (error) {
+          console.error('Handedness listener failed', error);
+        }
+      }
     },
     subscribe(listener) {
       listeners.add(listener);
