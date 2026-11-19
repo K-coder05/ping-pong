@@ -185,7 +185,7 @@ async function main(): Promise<void> {
     const lastTick = tickTimes[tickTimes.length - 1]!;
     idle = { start: lastTick + IDLE_GRACE_MS, end: lastTick + IDLE_GRACE_MS + IDLE_MS };
     phase = 'idle';
-    banner.textContent = `Stand and talk normally. Don't swing. ${IDLE_MS / 1000} s`;
+    banner.textContent = "Relax: arm down, stand and talk normally";
     show(paragraph('Idle phase: every detected swing counts as a false trigger.', 'muted'));
     const countdown = setInterval(() => {
       const left = Math.max(0, Math.ceil((idle.end - performance.now()) / 1000));
