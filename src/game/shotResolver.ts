@@ -282,9 +282,12 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         events.push({ type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: launchBall(position, launch.velocity) });
         state = { phase: 'returning' };
       }
-      if (state.phase === 'open' && state.idealAtMs !== null) {
-        const { hitWindowMs, lateGraceMs } = options.params();
-        if (nowMs > state.idealAtMs + hitWindowMs + lateGraceMs) {
+      if (state.phase === 'open') {
+        // No Swing judged by the end of the Late grace (a Swing is seen
+        // timingOffsetMs late): a Miss. A Feed that never reaches the player
+        // (no Ideal Time, only at extreme knob values) can't be hit at all.
+        const { hitWindowMs, lateGraceMs, timingOffsetMs } = options.params();
+        if (state.idealAtMs === null || nowMs > state.idealAtMs + timingOffsetMs + hitWindowMs + lateGraceMs) {
           events.push(state.earlyDelta === null ? { type: 'miss' } : { type: 'early', delta: state.earlyDelta, final: true });
           state = { phase: 'done' };
         }

@@ -52,7 +52,7 @@ export function createMouseSwingTracker(options: MouseSwingTrackerOptions): Mous
   const detector = createSwingDetector(options.params);
   let hand: Hand | null = null;
 
-  function feed(sample: PointerSample): SwingEvent | null {
+  function detect(sample: PointerSample): SwingEvent | null {
     const cx = sample.width / 2;
     const cy = sample.height / 2;
     const halfShoulder = (sample.width * options.shoulderWidth()) / 2;
@@ -68,10 +68,10 @@ export function createMouseSwingTracker(options: MouseSwingTrackerOptions): Mous
       // Each drag is a fresh stroke: no motion, Backswing or cooldown carries over.
       hand = options.hand();
       detector.reset();
-      feed(sample);
+      detect(sample);
     },
     move(sample) {
-      return hand ? feed(sample) : null;
+      return hand ? detect(sample) : null;
     },
     release() {
       hand = null;

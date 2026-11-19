@@ -259,6 +259,11 @@ describe('a Feed that is not returned', () => {
     expect(played.timeline[0]!.atMs).toBeLessThan(idealAtMs + 200 + 300 + FRAME_MS + 1);
   });
 
+  it('waits for Swings seen late by the Timing Offset before calling a Miss', () => {
+    const played = playFeed({ params: { timingOffsetMs: 400 }, swingsAtMs: [idealAtMs + 400 + 100] });
+    expect(types(played)).toEqual(['accepted', 'contact', 'return']);
+  });
+
   it('ignores Swings once the Feed is decided', () => {
     expect(playFeed({ swingsAtMs: [idealAtMs + 900] }).events).toEqual([{ type: 'miss' }]);
     expect(types(playFeed({ swingsAtMs: [idealAtMs, idealAtMs + 50] }))).toEqual(['accepted', 'contact', 'return']);
@@ -302,6 +307,16 @@ describe('feedResult', () => {
     expect(feedResult({ type: 'miss' })).toBe('failed');
     expect(feedResult({ type: 'early', delta: -300, final: true })).toBe('failed');
     expect(feedResult({ type: 'early', delta: -300, final: false })).toBeNull();
+  });
+});
+
+describe('a Feed that never reaches the player', () => {
+  it('is a Miss at once, so the Streak still resets', () => {
+    const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right' });
+    resolver.startFeed({ idealAtMs: null });
+    const ball = makeFeed().ball;
+    expect(resolver.update(16, ball, [])).toEqual([{ type: 'miss' }]);
+    expect(resolver.update(32, ball, [])).toEqual([]);
   });
 });
 

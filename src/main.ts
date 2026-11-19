@@ -14,9 +14,6 @@ import {
   MOUSE_SHOULDER_WIDTH,
   PHYSICS_DT,
   SHOW_IDEAL_TIME_MARKER,
-  SWING_COOLDOWN_MS,
-  SWING_OFF,
-  SWING_ON,
   TABLE_TOP_Y,
   TIME_SCALE,
 } from './game/constants.ts';
@@ -30,6 +27,7 @@ import { createShotResolver, feedResult, knobResolverParams, type ShotEvent } fr
 import { createSimClock } from './game/simClock.ts';
 import { installPoseInput } from './input/installPoseInput.ts';
 import { installMouseInput, swingInputMode } from './input/mouseInput.ts';
+import { knobSwingParams } from './input/poseInput.ts';
 import type { SwingSource } from './input/types.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { installCameraOverlay } from './render/cameraOverlay.ts';
@@ -57,7 +55,7 @@ const hittingHand = () => handedness.hand ?? 'right';
 const swings: SwingSource =
   swingInputMode(window.location.search) === 'mouse'
     ? installMouseInput(canvas, {
-        params: () => ({ swingOn: SWING_ON.value, swingOff: SWING_OFF.value, cooldownMs: SWING_COOLDOWN_MS.value }),
+        params: knobSwingParams,
         hand: hittingHand,
         shoulderWidth: () => MOUSE_SHOULDER_WIDTH.value,
         enabled: () => !debug.active, // in debug mode, drags orbit the camera
