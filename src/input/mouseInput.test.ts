@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Hand } from '../sensing/landmarks.ts';
-import { createMouseSwingTracker, swingInputMode } from './mouseInput.ts';
+import { createMouseSwingTracker, mouseHandPosition, swingInputMode } from './mouseInput.ts';
 import type { SwingEvent } from './types.ts';
 
 const WIDTH = 1000;
@@ -78,5 +78,28 @@ describe('swingInputMode', () => {
     expect(swingInputMode('')).toBe('pose');
     expect(swingInputMode('?input=pose')).toBe('pose');
     expect(swingInputMode('?mouse')).toBe('pose');
+  });
+});
+
+describe('mouse wrist position (for the Paddle)', () => {
+  const REACH = 2; // shoulder widths at the canvas edges
+  const REST_PY = 0.75;
+  const at = (x: number, y: number, hand: Hand = 'right') =>
+    mouseHandPosition({ t: 5, x, y, width: WIDTH, height: HEIGHT }, { hand, reachSw: REACH, restPy: REST_PY });
+
+  it('puts the wrist at the ready, on the midline, at the canvas centre', () => {
+    expect(at(500, 300)).toEqual({ t: 5, u: 0, py: REST_PY });
+  });
+
+  it("spans the reach across the canvas, + on the hitting side (the right half for a right-hander)", () => {
+    expect(at(1000, 300).u).toBeCloseTo(2);
+    expect(at(0, 300).u).toBeCloseTo(-2);
+    expect(at(750, 300).u).toBeCloseTo(1);
+    expect(at(1000, 300, 'left').u).toBeCloseTo(-2);
+  });
+
+  it('measures height on the same scale, lower on screen being lower (image y grows downward)', () => {
+    expect(at(500, 300 + 250).py).toBeCloseTo(REST_PY + 1);
+    expect(at(500, 300 - 125).py).toBeCloseTo(REST_PY - 0.5);
   });
 });

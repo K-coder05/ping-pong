@@ -1,3 +1,4 @@
+import { contextTimeAt } from '../audio/audioClock.ts';
 import type { MetronomeOptions } from './metronome.ts';
 
 /**
@@ -6,12 +7,10 @@ import type { MetronomeOptions } from './metronome.ts';
  * `createMetronome`, so the logic stays testable without audio or DOM.
  *
  * Sync approach: the Web Audio click is scheduled at the exact context time
- * matching the tick's `performance.now()` time, using
- * `AudioContext.getOutputTimestamp()` (a paired contextTime/performanceTime
- * sample of what is leaving the speakers now), so it already accounts for
- * output latency where the browser reports it; falls back to
- * `currentTime` + `baseLatency`. The flash is toggled from `onTick`, which
- * fires within a few ms of the tick time (screen refresh adds up to ~16 ms).
+ * matching the tick's `performance.now()` time (`contextTimeAt`), so it
+ * already accounts for output latency where the browser reports it. The
+ * flash is toggled from `onTick`, which fires within a few ms of the tick
+ * time (screen refresh adds up to ~16 ms).
  */
 
 const CLICK_HZ = 1000;
@@ -34,15 +33,6 @@ export interface PresentationOptions {
 export function createMetronomePresentation({ flashElement, flashMs = 150 }: PresentationOptions): MetronomePresentation {
   let ctx: AudioContext | null = null;
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
-
-  /** AudioContext time at which `performanceTime` (ms) will be heard. */
-  function contextTimeAt(audio: AudioContext, performanceTime: number): number {
-    const stamp = audio.getOutputTimestamp?.();
-    if (stamp && stamp.performanceTime && stamp.contextTime !== undefined && stamp.performanceTime > 0) {
-      return stamp.contextTime + (performanceTime - stamp.performanceTime) / 1000;
-    }
-    return audio.currentTime + (performanceTime - performance.now()) / 1000 + (audio.baseLatency ?? 0);
-  }
 
   return {
     callbacks: {

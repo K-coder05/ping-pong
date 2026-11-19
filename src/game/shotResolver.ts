@@ -303,6 +303,6 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
  * end of the table; struck from there it would count as out at once, but a
  * Swing in the Hit Window is always struck (ADR 0001).
  */
-function contactPoint(ball: Readonly<Vec3>): Vec3 {
+export function contactPoint(ball: Readonly<Vec3>): Vec3 {
   return { x: ball.x, y: Math.max(ball.y, TABLE_TOP_Y + BALL_RADIUS), z: ball.z };
 }

@@ -7,11 +7,18 @@
  * draw from whichever camera is active. Swings arrive between frames from the
  * active `SwingSource`; the game never knows whether that is pose or mouse.
  */
-import { launchBall, stepBall, type BallEvent, type BallState } from './game/ball.ts';
+import { createSounds, unlockAudioOnGesture } from './audio/sounds.ts';
+import { launchBall, simulate, stepBall, type BallEvent, type BallState } from './game/ball.ts';
 import {
+  BALL_DRAW_SCALE,
   BALL_RADIUS,
+  CONTACT_ASSIST,
+  LATENCY_EXTRAPOLATION,
+  LATENCY_EXTRAPOLATION_MS,
   MAX_FRAME_DT,
   MOUSE_SHOULDER_WIDTH,
+  PADDLE_MAPPING_RANGE,
+  PADDLE_REST_PY,
   PHYSICS_DT,
   SHOW_IDEAL_TIME_MARKER,
   TABLE_TOP_Y,
@@ -23,16 +30,18 @@ import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { createListeners } from './game/listeners.ts';
 import { createScore } from './game/score.ts';
-import { createShotResolver, feedResult, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
+import { contactPoint, createShotResolver, feedResult, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { createSimClock } from './game/simClock.ts';
+import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput } from './input/installPoseInput.ts';
-import { installMouseInput, swingInputMode } from './input/mouseInput.ts';
+import { installMouseInput, swingInputMode, type MouseInput } from './input/mouseInput.ts';
 import { knobSwingParams } from './input/poseInput.ts';
 import type { SwingSource } from './input/types.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode } from './render/debugMode.ts';
 import { createHud } from './render/hud.ts';
+import { createPaddle } from './render/paddle.ts';
 import { createTableScene } from './render/scene.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
@@ -48,19 +57,29 @@ const hud = createHud();
 /** The hitting hand: as saved, or right until the player is asked. */
 const hittingHand = () => handedness.hand ?? 'right';
 
-/**
- * The one SwingSource the game listens to: the developer mouse with
- * `?input=mouse` (never offered to players), otherwise pose.
- */
-const swings: SwingSource =
+/** The developer mouse, with `?input=mouse` only (never offered to players). */
+const mouse: MouseInput | null =
   swingInputMode(window.location.search) === 'mouse'
     ? installMouseInput(canvas, {
         params: knobSwingParams,
         hand: hittingHand,
         shoulderWidth: () => MOUSE_SHOULDER_WIDTH.value,
         enabled: () => !debug.active, // in debug mode, drags orbit the camera
+        reachSw: () => PADDLE_MAPPING_RANGE.value, // the canvas spans the table
+        restPy: PADDLE_REST_PY,
       })
-    : poseSwings;
+    : null;
+
+/** The one SwingSource the game listens to: the mouse if on, otherwise pose. */
+const swings: SwingSource = mouse ?? poseSwings;
+
+/**
+ * Where the hitting wrist is, for the Paddle to follow: the mouse if on.
+ * #13 plugs pose in here: replace `{ latest: null }` with pose's
+ * HandPositionSource (a store set from each frame's SwingReading with
+ * `handPositionFromReading`, cleared when the wrist is lost).
+ */
+const handPositions: HandPositionSource = mouse ?? { latest: null };
 
 /**
  * The one ball in play: at rest on the player's half until something launches
@@ -72,17 +91,52 @@ const simClock = createSimClock();
 const ballStatus = createBallStatusReadout();
 
 const feeder = createFeeder();
+const sounds = createSounds();
+unlockAudioOnGesture(sounds);
+
+/**
+ * The Paddle: drawn for feel, never deciding a Return (ADR 0001). With
+ * contact assist it eases onto the ball where the resolver will strike it:
+ * the ball in play, simulated ahead to the contact moment.
+ */
+const paddle = createPaddle({
+  params: () => ({
+    rangeSw: PADDLE_MAPPING_RANGE.value,
+    contactAssist: CONTACT_ASSIST.value,
+    latencyExtrapolation: LATENCY_EXTRAPOLATION.value,
+    latencyMs: LATENCY_EXTRAPOLATION_MS.value,
+    ballDrawScale: BALL_DRAW_SCALE.value,
+  }),
+  hand: hittingHand,
+  predictContact: (contactAtMs, nowMs) => {
+    const simSeconds = (Math.max(0, contactAtMs - nowMs) / 1000) * TIME_SCALE.value;
+    return contactPoint(simulate(ball, { maxTime: simSeconds }).state.position);
+  },
+});
+
 const resolver = createShotResolver({ params: knobResolverParams, hand: hittingHand });
 const score = createScore();
 
 /**
- * Hooks for the Paddle and sounds (#6). `shotEvents` carries every resolver
- * event: `accepted` (Paddle animation from Swing Onset, contact due at
- * `contactAtMs`), `contact` (time, position, side, Swing, delta: the contact
- * sound), and the Feed's outcome. `bounces` carries every table bounce.
+ * `shotEvents` carries every resolver event: `accepted` starts the Paddle's
+ * Swing animation and schedules the contact tock for `contactAtMs`;
+ * `contact` (the frame the Return launches) pins the Paddle's contact frame
+ * and point; then the Feed's outcome. `bounces` carries every table bounce,
+ * each one a bounce tock.
  */
 const shotEvents = createListeners<ShotEvent>();
 const bounces = createListeners<Extract<BallEvent, { type: 'bounce' }>>();
+
+shotEvents.subscribe((event) => {
+  if (event.type === 'accepted') {
+    paddle.swing({ onsetMs: event.swing.t, contactAtMs: event.contactAtMs, side: event.swing.side });
+    // Scheduled now, so it is heard exactly at the contact moment.
+    sounds.contact(event.contactAtMs);
+  } else if (event.type === 'contact') {
+    paddle.contact(event.atMs, event.position);
+  }
+});
+bounces.subscribe(() => sounds.bounce());
 
 const FEEDBACK: Partial<Record<ShotEvent['type'], string>> = { early: 'Early!', late: 'Late!', miss: 'Miss' };
 
@@ -162,6 +216,7 @@ function frame(now: number): void {
   debug.update(elapsedSeconds);
   ballStatus.update(ball, debug.active);
   tableScene.syncBall(ball.position);
+  tableScene.syncPaddle(paddle.update(now, handPositions.latest));
   tableScene.syncIdealTimeMarker(idealTimeMarker());
   tableScene.render(debug.camera);
 }

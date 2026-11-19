@@ -176,9 +176,26 @@ export const BALL_DRAW_SCALE = knobs.number({ name: 'BALL_DRAW_SCALE', min: 1, m
 /** Debug marker where (and, by lighting up, when) each Feed reaches its Ideal Time. */
 export const SHOW_IDEAL_TIME_MARKER = knobs.toggle({ name: 'SHOW_IDEAL_TIME_MARKER', default: true, group: 'Render' });
 
+/** z of the Paddle's centre at rest: just behind the player's end line. */
+export const PADDLE_Z = PLAYER_END_Z + 0.1;
+/** Paddle centre height above the table top with the wrist at the ready, metres. */
+export const PADDLE_REST_HEIGHT_M = 0.25;
+/**
+ * The wrist's vertical position at the ready (`p.y`), shoulder widths below
+ * the shoulder line: elbow bent, forearm forward. The Paddle sits at
+ * PADDLE_REST_HEIGHT_M there.
+ */
+export const PADDLE_REST_PY = 0.75;
+
 /** Shoulder widths of wrist travel that span the table's width. */
 export const PADDLE_MAPPING_RANGE = knobs.number({ name: 'PADDLE_MAPPING_RANGE', min: 0.5, max: 4, step: 0.1, default: 2, group: 'Paddle' });
 /** Ease the Paddle toward the ball's contact point once a Swing is accepted. */
 export const CONTACT_ASSIST = knobs.toggle({ name: 'CONTACT_ASSIST', default: true, group: 'Paddle' });
-/** Draw the Paddle ahead of the wrist by the measured latency. */
+/** Draw the Paddle ahead of the wrist by the measured latency (LATENCY_EXTRAPOLATION_MS). */
 export const LATENCY_EXTRAPOLATION = knobs.toggle({ name: 'LATENCY_EXTRAPOLATION', default: false, group: 'Paddle' });
+/**
+ * How far ahead latency extrapolation draws the wrist, ms: set it to the
+ * motion-to-screen latency measured with the latency harness (SPEC expects
+ * roughly 100–230 ms).
+ */
+export const LATENCY_EXTRAPOLATION_MS = knobs.number({ name: 'LATENCY_EXTRAPOLATION_MS', min: 0, max: 400, step: 5, default: 150, group: 'Paddle' });

@@ -32,6 +32,8 @@ import {
   TABLE_TOP_Y,
   TABLE_WIDTH,
 } from '../game/constants.ts';
+import { drawnBall } from './drawnBall.ts';
+import { PADDLE_BLADE_THICKNESS, type PaddlePose } from './paddle.ts';
 
 export interface Vec3Like {
   x: number;
@@ -54,6 +56,8 @@ export interface TableScene {
    * end, lit up once it has (`reached`). Null hides it.
    */
   syncIdealTimeMarker(marker: { position: Vec3Like; reached: boolean } | null): void;
+  /** Draw the Paddle: blade centre at `position`, the Forehand (red) or Backhand (black) face toward the Feeder. */
+  syncPaddle(pose: PaddlePose): void;
   /** Resize the drawing buffer and the play camera to the canvas size. */
   resize(width: number, height: number): void;
   render(camera: PerspectiveCamera): void;
@@ -80,7 +84,8 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
   const ball = createBall();
   const shadow = createBallShadow();
   const idealMarker = createIdealTimeMarker();
-  scene.add(ball, shadow, idealMarker);
+  const paddle = createPaddle();
+  scene.add(ball, shadow, idealMarker, paddle);
 
   const playCamera = new PerspectiveCamera(PLAY_CAMERA_FOV, 1, 0.05, 50);
   playCamera.position.set(PLAY_CAMERA_POSITION.x, PLAY_CAMERA_POSITION.y, PLAY_CAMERA_POSITION.z);
@@ -93,9 +98,8 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
     syncBall(position) {
       const scale = BALL_DRAW_SCALE.value;
       ball.scale.setScalar(scale);
-      // Lift the enlarged ball so its bottom sits where the physics ball's
-      // bottom is: it then visibly touches the table at each bounce.
-      ball.position.set(position.x, position.y + BALL_RADIUS * (scale - 1), position.z);
+      const { centre } = drawnBall(position, scale);
+      ball.position.set(centre.x, centre.y, centre.z);
 
       // Straight down, the same size as the drawn ball: where it lands is
       // where the shadow meets it, the main cue for judging when it arrives.
@@ -110,6 +114,12 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
       idealMarker.position.set(marker.position.x, marker.position.y, marker.position.z);
       idealMarker.material.color.setHex(marker.reached ? IDEAL_MARKER_REACHED : IDEAL_MARKER_WAITING);
       idealMarker.material.opacity = marker.reached ? 0.95 : 0.6;
+    },
+    syncPaddle(pose) {
+      paddle.position.set(pose.position.x, pose.position.y, pose.position.z);
+      // Yaw first, then pitch about the blade's own horizontal axis. Turning
+      // the blade over for a Backhand flips that axis, so the sign follows.
+      paddle.rotation.set(pose.backhandFace ? pose.pitch : -pose.pitch, pose.yaw + (pose.backhandFace ? Math.PI : 0), 0, 'YXZ');
     },
     resize(width, height) {
       renderer.setSize(width, height);
@@ -210,6 +220,36 @@ function createBallShadow(): Mesh {
   );
   shadow.rotation.x = -Math.PI / 2;
   return shadow;
+}
+
+const PADDLE_BLADE_RADIUS = 0.076; // a 15 cm blade
+const PADDLE_HANDLE_LENGTH = 0.1;
+
+/**
+ * The Paddle: a round blade standing upright across the table, red rubber on
+ * the Forehand face (toward the Feeder at rest) and black on the Backhand
+ * face, with the handle hanging below. Its origin is the blade's centre.
+ */
+function createPaddle(): Group {
+  const paddle = new Group();
+  const wood = new MeshStandardMaterial({ color: 0xc89a5b, roughness: 0.7 });
+  const forehandRubber = new MeshStandardMaterial({ color: 0xc0262d, roughness: 0.55 });
+  const backhandRubber = new MeshStandardMaterial({ color: 0x15161a, roughness: 0.55 });
+
+  // CylinderGeometry's groups: 0 the edge, 1 the top cap (+y), 2 the bottom cap (−y).
+  // Turned to lie along z, the top cap faces the player (+z) and the bottom cap the Feeder.
+  const blade = new Mesh(new CylinderGeometry(PADDLE_BLADE_RADIUS, PADDLE_BLADE_RADIUS, PADDLE_BLADE_THICKNESS, 40), [
+    wood,
+    backhandRubber,
+    forehandRubber,
+  ]);
+  blade.rotation.x = Math.PI / 2;
+  paddle.add(blade);
+
+  const handle = new Mesh(new BoxGeometry(0.026, PADDLE_HANDLE_LENGTH, 0.022), wood);
+  handle.position.y = -(PADDLE_BLADE_RADIUS + PADDLE_HANDLE_LENGTH / 2 - 0.01);
+  paddle.add(handle);
+  return paddle;
 }
 
 /** A ring standing across the player's end line, facing the play camera. */
