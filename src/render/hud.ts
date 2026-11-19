@@ -86,7 +86,7 @@ export function createHud(): Hud {
     borderRadius: '0.4em',
     background: 'rgba(12, 14, 20, 0.75)',
     pointerEvents: 'none',
-    zIndex: '6',
+    zIndex: '9', // above the onboarding panel, so it shows during calibration too
     color: '#ffffff',
     font: `700 7vmin/1.2 ${FONT}`,
     textShadow: SHADOW,

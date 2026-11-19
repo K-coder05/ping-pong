@@ -66,7 +66,6 @@ if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
 
 const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
-knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
 installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
 const hud = createHud();
 
@@ -101,13 +100,25 @@ const swings: SwingSource = mouse ?? pose;
 const handPositions: HandPositionSource = mouse ?? pose;
 
 /**
- * The saved Timing Offset becomes the TIMING_OFFSET_MS knob's starting value;
- * the resolver (and the Feeder's wait for a late Swing) read the knob. Only
- * calibration saves: dragging the knob (or "Reset all knobs") changes this
- * page's play but not what is saved, so a returning player's next visit still
- * uses their measured offset. Redo calibration to replace it.
+ * The saved Timing Offset becomes the TIMING_OFFSET_MS knob's starting value
+ * (and what "Reset all knobs" returns it to); the resolver (and the Feeder's
+ * wait for a late Swing) read the knob. Only calibration saves: dragging the
+ * knob changes this page's play but not what is saved, so a returning
+ * player's next visit still uses their measured offset. Redo calibration to
+ * replace it.
  */
-if (!mouse && timingOffsetStore.offsetMs !== null) TIMING_OFFSET_MS.set(timingOffsetStore.offsetMs);
+function applySavedTimingOffset(): void {
+  if (!mouse && timingOffsetStore.offsetMs !== null) TIMING_OFFSET_MS.set(timingOffsetStore.offsetMs);
+}
+applySavedTimingOffset();
+knobs.button({
+  name: 'Reset all knobs',
+  group: 'Debug',
+  onPress: () => {
+    knobs.resetAll();
+    applySavedTimingOffset(); // the player's measurement, not a tuning default
+  },
+});
 
 const onboardingScreens = createOnboardingScreens();
 /** Whether onboarding has finished, so the drill may feed. */
@@ -135,12 +146,12 @@ async function calibrate(cancellable: boolean): Promise<void> {
  * prototype"), then the drill. Starting the camera lives here, in its first
  * step; if it can't start, the player is told why and can try again.
  */
-const steps = onboardingSteps({
-  input: mouse ? 'mouse' : 'pose',
+const onboardingPlan = onboardingSteps({
+  input: mouseMode ? 'mouse' : 'pose',
   handSaved: handedness.hand !== null,
   timingOffsetSaved: timingOffsetStore.offsetMs !== null,
 });
-void runOnboarding(steps, {
+void runOnboarding(onboardingPlan, {
   'ask-camera': () => onboardingScreens.askCamera(startCamera),
   'start-camera': () => onboardingScreens.startCamera(startCamera),
   framing: async () => onboardingScreens.framing((await sharedSensing()).video),
@@ -162,7 +173,11 @@ knobs.button({
 
 /** Whether the Feeder must wait for the player's hand: never with the mouse. */
 const waitingForHand = (): boolean => !mouse && pose.tracking !== 'tracked';
-/** Whether to show "Can't see your hand": once pose is running, until the wrist is first seen and whenever it is lost. */
+/**
+ * Whether to show "Can't see your hand": once pose is running, until the wrist
+ * is first seen and whenever it is lost, during the drill and calibration
+ * (whose Swings also need the wrist tracked).
+ */
 const handLost = (): boolean => !mouse && pose.tracking === 'lost';
 /** Whether the drill is on: onboarding done and not recalibrating. */
 const drilling = (): boolean => drillStarted && !calibrating;
@@ -301,7 +316,7 @@ function frame(now: number): void {
   // before onboarding finishes, while recalibrating, or while the hand can't
   // be seen; a Feed in flight plays out.
   feeder.setPaused(!drilling() || waitingForHand());
-  hud.showHandLost(drilling() && handLost());
+  hud.showHandLost((drilling() || calibrating) && handLost());
   feeder.update({ realSeconds: Math.min(elapsedSeconds, MAX_FRAME_DT), simSeconds: steps * PHYSICS_DT, nowMs: now }, ball);
   hud.showCountdown(feeder.countdown);
 

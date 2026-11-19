@@ -190,7 +190,9 @@ export function createOnboardingScreens(): OnboardingScreens {
 
     calibrate({ video, swings, cancellable }) {
       return new Promise<number | null>((resolve) => {
+        let finished = false;
         const finish = (offset: number | null) => {
+          finished = true;
           hide();
           resolve(offset);
         };
@@ -218,6 +220,11 @@ export function createOnboardingScreens(): OnboardingScreens {
           // Called from the Start click, so the AudioContext may start. Silent
           // if audio is unavailable; the flash still works.
           await presented.unlock().catch(() => undefined);
+          if (finished) {
+            // Cancelled while audio was starting.
+            presented.dispose();
+            return;
+          }
           const progress = paragraph('Swings seen: 0', 'muted');
           view.banner.textContent = 'Get ready…';
           const run = runTimingCalibration({
