@@ -27,7 +27,7 @@ export interface TrackingLossDetector {
   reset(): void;
 }
 
-/** `params` is read every frame (live knobs). */
+/** `params` is read every frame, so knob changes apply at once. */
 export function createTrackingLossDetector(params: () => TrackingLossParams): TrackingLossDetector {
   let tracked = false;
   /** Frames in a row that disagree with `tracked`. */

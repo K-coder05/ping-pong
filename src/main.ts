@@ -86,11 +86,13 @@ const handPositions: HandPositionSource = mouse ?? pose;
  * onboarding will call `startCamera` from its camera-permission step instead.
  * Until the camera is on and the hitting hand is known, the Feeder waits.
  */
+// If the camera can't start (e.g. permission denied), play just waits: no Feed
+// and no banner. #14's permission step is where the player gets told.
 if (!mouse) startCamera().catch((error: unknown) => console.error('Camera failed to start', error));
 
 /** Whether the Feeder must wait for the player's hand: never with the mouse. */
 const waitingForHand = (): boolean => !mouse && pose.tracking !== 'tracked';
-/** Whether to show "Can't see your hand": once pose is running, while the wrist is lost. */
+/** Whether to show "Can't see your hand": once pose is running, until the wrist is first seen and whenever it is lost. */
 const handLost = (): boolean => !mouse && pose.tracking === 'lost';
 
 /**

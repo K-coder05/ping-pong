@@ -171,7 +171,7 @@ export function createCameraOverlay(startSensing: () => Promise<Sensing>): Camer
       const landmark = frame.landmarks?.[LANDMARK[name]];
       if (!landmark) continue;
       const color = sideOf(name) === frame.hand ? COLOR.hitting : COLOR.other;
-      dot(toCanvas(landmark), 5, color, landmark.visibility >= TRACKING_MIN_VISIBILITY);
+      dot(toCanvas(landmark), 5, color, landmark.visibility >= TRACKING_MIN_VISIBILITY.value);
     }
 
     trail.forEach((point, i) => {
@@ -181,7 +181,7 @@ export function createCameraOverlay(startSensing: () => Promise<Sensing>): Camer
       ctx.arc(p.x, p.y, 3 + i * 0.3, 0, Math.PI * 2);
       ctx.fill();
     });
-    if (frame.wrist) dot(toCanvas(frame.wrist), 8, COLOR.wrist, frame.wristVisibility >= TRACKING_MIN_VISIBILITY);
+    if (frame.wrist) dot(toCanvas(frame.wrist), 8, COLOR.wrist, frame.wristVisibility >= TRACKING_MIN_VISIBILITY.value);
 
     for (const extension of extensions) extension.draw?.({ ctx, width, height, frame, toCanvas });
   }
@@ -200,7 +200,7 @@ export function createCameraOverlay(startSensing: () => Promise<Sensing>): Camer
 
   function readoutText(frame: SensingFrame): string {
     const fmt = (n: number | null) => (n === null ? '–' : n.toFixed(1));
-    const lost = frame.wristVisibility < TRACKING_MIN_VISIBILITY ? ' (lost)' : '';
+    const lost = frame.wristVisibility < TRACKING_MIN_VISIBILITY.value ? ' (lost)' : '';
     return [
       `camera ${fmt(frame.cameraFps)} fps · pose ${fmt(frame.poseFps)} fps`,
       `inference ${fmt(frame.meanInferenceMs)} ms avg (${sensing?.delegate ?? '?'}) · capture→result ${fmt(frame.processedAt - frame.t)} ms`,

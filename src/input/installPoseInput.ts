@@ -45,12 +45,13 @@ export function startCamera(): Promise<void> {
  * Swing group gets an "Ask handedness" button to change hands.
  *
  * Returns right away; it emits Swings and has a wrist position once sensing
- * has started and the hand is known. It never starts the camera itself.
+ * has started and the hand is known, and only while the wrist is tracked.
+ * It never starts the camera itself.
  */
 export function installPoseInput(registry: KnobRegistry): InstalledPoseInput {
   const swings = createSwingEmitter();
   /** The tracked hitting wrist, once sensing has started and the hand is known. */
-  let wrist: PoseHand | null = null;
+  let poseHand: PoseHand | null = null;
   const report = (error: unknown) => console.error('Handedness prompt failed', error);
 
   registry.button({
@@ -71,8 +72,13 @@ export function installPoseInput(registry: KnobRegistry): InstalledPoseInput {
         return videoWidth && videoHeight ? videoWidth / videoHeight : DEFAULT_ASPECT;
       },
     });
-    input.subscribe(swings.emit);
-    wrist = createPoseHand(sensing, input);
+    poseHand = createPoseHand(sensing, input);
+    // While the wrist is lost its position is a guess, so a "Swing" from it
+    // could Return a Feed the player never hit. (Tracking is as of the
+    // previous frame here; loss itself takes several frames to call.)
+    input.subscribe((swing) => {
+      if (poseHand?.tracked) swings.emit(swing);
+    });
     addOverlayExtension(createSwingOverlay(input));
   }
 
@@ -81,11 +87,11 @@ export function installPoseInput(registry: KnobRegistry): InstalledPoseInput {
   return {
     subscribe: swings.subscribe,
     get latest() {
-      return wrist?.latest ?? null;
+      return poseHand?.latest ?? null;
     },
     get tracking() {
-      if (!wrist) return 'starting';
-      return wrist.tracked ? 'tracked' : 'lost';
+      if (!poseHand) return 'starting';
+      return poseHand.tracked ? 'tracked' : 'lost';
     },
   };
 }

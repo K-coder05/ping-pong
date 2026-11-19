@@ -169,11 +169,11 @@ export const ONE_EURO_MIN_CUTOFF = knobs.number({ name: 'ONE_EURO_MIN_CUTOFF', m
 /** One Euro filter speed coefficient. */
 export const ONE_EURO_BETA = knobs.number({ name: 'ONE_EURO_BETA', min: 0, max: 0.1, step: 0.001, default: 0.01, group: 'Smoothing' });
 /** Hitting-wrist visibility below which the wrist counts as lost (tracking-loss banner). */
-export const TRACKING_MIN_VISIBILITY = 0.5;
+export const TRACKING_MIN_VISIBILITY = knobs.number({ name: 'TRACKING_MIN_VISIBILITY', min: 0.1, max: 0.9, step: 0.05, default: 0.5, group: 'Tracking' });
 /** The hitting wrist is lost after more than this many camera frames in a row below `TRACKING_MIN_VISIBILITY` (~170 ms at 30 FPS). */
-export const TRACKING_LOST_FRAMES = 5;
+export const TRACKING_LOST_FRAMES = knobs.number({ name: 'TRACKING_LOST_FRAMES', min: 1, max: 30, step: 1, default: 5, group: 'Tracking' });
 /** A lost (or never seen) hitting wrist is tracked again after this many camera frames in a row at or above it. */
-export const TRACKING_FOUND_FRAMES = 3;
+export const TRACKING_FOUND_FRAMES = knobs.number({ name: 'TRACKING_FOUND_FRAMES', min: 1, max: 30, step: 1, default: 3, group: 'Tracking' });
 
 /** Ball drawn this many times its physics radius, so it's readable from 2 m. */
 export const BALL_DRAW_SCALE = knobs.number({ name: 'BALL_DRAW_SCALE', min: 1, max: 4, step: 0.1, default: 2, group: 'Render' });

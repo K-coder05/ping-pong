@@ -23,16 +23,20 @@ export interface PoseHand extends HandPositionSource {
 }
 
 export interface PoseHandOptions {
-  /** Live tracking-loss thresholds; defaults to `TRACKING_MIN_VISIBILITY`, `TRACKING_LOST_FRAMES` and `TRACKING_FOUND_FRAMES`. */
+  /** Tracking-loss thresholds, read every frame; defaults to the `TRACKING_MIN_VISIBILITY`, `TRACKING_LOST_FRAMES` and `TRACKING_FOUND_FRAMES` knobs. */
   tracking?: () => TrackingLossParams;
 }
 
 const defaultTracking = (): TrackingLossParams => ({
-  minVisibility: TRACKING_MIN_VISIBILITY,
-  lostAfterFrames: TRACKING_LOST_FRAMES,
-  foundAfterFrames: TRACKING_FOUND_FRAMES,
+  minVisibility: TRACKING_MIN_VISIBILITY.value,
+  lostAfterFrames: TRACKING_LOST_FRAMES.value,
+  foundAfterFrames: TRACKING_FOUND_FRAMES.value,
 });
 
+/**
+ * Track the hitting wrist from `sensing`'s frames, positioned by `input`'s
+ * readings of the same frames (each frame is read once, whoever asks first).
+ */
 export function createPoseHand(sensing: FrameSource, input: Pick<PoseInput, 'read'>, options: PoseHandOptions = {}): PoseHand {
   const tracking = createTrackingLossDetector(options.tracking ?? defaultTracking);
   const wrist = createHandPositionStore();
