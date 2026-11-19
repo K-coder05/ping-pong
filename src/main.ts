@@ -9,6 +9,7 @@ import { BALL_RADIUS, TABLE_TOP_Y, TIME_SCALE } from './game/constants.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { knobs } from './game/knobs.ts';
 import { createSimClock } from './game/simClock.ts';
+import { installPoseInput } from './input/installPoseInput.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode } from './render/debugMode.ts';
@@ -21,6 +22,7 @@ const tableScene = createTableScene(canvas);
 const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: tableScene.playCamera, registry: knobs });
 knobs.button({ name: 'Reset all knobs', group: 'Debug', onPress: () => knobs.resetAll() });
 installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
+installPoseInput(knobs); // pose Swing detector; returns the SwingSource the shot resolver (#13) will consume
 
 /** The one ball in play: at rest on the player's half until something launches it. */
 let ball: BallState = launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 }, { x: 0, y: 0, z: 0 });
