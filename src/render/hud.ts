@@ -14,8 +14,7 @@ export function createHud(): Hud {
   Object.assign(countdown.style, {
     position: 'fixed',
     inset: '0',
-    display: 'none', // 'grid' while showing; an inline display would beat the `hidden` attribute
-
+    display: 'none', // 'grid' while showing (toggled here, not with `hidden`, which an inline display overrides)
     placeItems: 'center',
     pointerEvents: 'none',
     zIndex: '5',

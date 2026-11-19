@@ -1,19 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { launchBall, simulate } from './ball.ts';
-import { BALL_RADIUS, FEEDER_END_Z, NET_HEIGHT, TABLE_TOP_Y } from './constants.ts';
+import { launchBall, simulate, type Vec3 } from './ball.ts';
+import { BALL_RADIUS, FEEDER_MOUTH, NET_HEIGHT, TABLE_TOP_Y } from './constants.ts';
 import { solveLaunch } from './solver.ts';
 
 /** Where the ball first touches the table (or reaches table height off it), found with the real integrator. */
-function firstLanding(from: { x: number; y: number; z: number }, velocity: { x: number; y: number; z: number }) {
+function firstLanding(from: Vec3, velocity: Vec3) {
   const run = simulate(launchBall(from, velocity), {
     maxTime: 5,
-    until: (state, _time, events) => events.some((e) => e.type === 'bounce') || state.position.y <= TABLE_TOP_Y + BALL_RADIUS,
+    until: (state, _time, events) =>
+      events.some((e) => e.type === 'bounce') || (state.velocity.y < 0 && state.position.y <= TABLE_TOP_Y + BALL_RADIUS),
   });
   const bounce = run.events.find((e) => e.event.type === 'bounce');
   return { position: bounce ? bounce.event.position : run.state.position, time: run.time };
 }
-
-const FEEDER_MOUTH = { x: 0, y: TABLE_TOP_Y + 0.3, z: FEEDER_END_Z };
 
 describe('target solver', () => {
   it('lands a Feed on its target despite drag', () => {
@@ -32,6 +31,16 @@ describe('target solver', () => {
     const landing = firstLanding(contact, velocity);
     expect(landing.position.x).toBeCloseTo(-0.5, 2);
     expect(landing.position.z).toBeCloseTo(-1.1, 2);
+  });
+
+  it('solves a late Return struck below table height, past the player end', () => {
+    const low = { x: -0.2, y: TABLE_TOP_Y - 0.05, z: 1.6 };
+    const solution = solveLaunch(low, { x: 0.3, z: -0.9 }, 0.8);
+
+    expect(netClearance(low, solution.velocity)).toBeGreaterThanOrEqual(0.05);
+    const landing = firstLanding(low, solution.velocity);
+    expect(landing.position.x).toBeCloseTo(0.3, 2);
+    expect(landing.position.z).toBeCloseTo(-0.9, 2);
   });
 
   it('raises the arc (longer flight time) when the asked-for shot would not clear the net by 5 cm', () => {
@@ -54,7 +63,7 @@ describe('target solver', () => {
 });
 
 /** Height of the ball's bottom above the net top as its centre crosses z = 0. */
-function netClearance(from: { x: number; y: number; z: number }, velocity: { x: number; y: number; z: number }): number {
+function netClearance(from: Vec3, velocity: Vec3): number {
   let previous = launchBall(from, velocity);
   let crossingY = NaN;
   simulate(previous, {

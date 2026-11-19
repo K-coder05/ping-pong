@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { launchBall, stepBall, type BallEvent, type BallState } from './ball.ts';
-import { FEED_FLIGHT_TIME_S, FEEDER_MOUTH, PHYSICS_DT, PLAYER_END_Z, TIME_SCALE } from './constants.ts';
+import { BALL_RADIUS, FEED_FLIGHT_TIME_S, FEEDER_MOUTH, HIT_WINDOW_MS, PHYSICS_DT, PLAYER_END_Z, TABLE_TOP_Y, TIME_SCALE } from './constants.ts';
 import { createFeeder, findIdealTime, type Feed, type Feeder } from './feeder.ts';
 import { createSimClock } from './simClock.ts';
 import { solveLaunch } from './solver.ts';
@@ -78,6 +78,9 @@ function driver(feeder: Feeder) {
     setBall(next: BallState) {
       ball = next;
     },
+    get nowMs() {
+      return nowMs;
+    },
   };
 }
 
@@ -86,22 +89,22 @@ describe('Feeder scheduling', () => {
     const feeder = createFeeder({ random: seededRandom(1) });
     const feeds: Feed[] = [];
     feeder.onFeed((feed) => feeds.push(feed));
-    const clock = driver(feeder);
+    const game = driver(feeder);
 
-    clock.run(1.4);
+    game.run(1.4);
     expect(feeder.phase).toBe('waiting');
     expect(feeder.countdown).toBeNull();
 
-    clock.run(0.2); // 1.6 s
+    game.run(0.2); // 1.6 s
     expect(feeder.phase).toBe('countdown');
     expect(feeder.countdown).toBe(3);
-    clock.run(0.5); // 2.1 s
+    game.run(0.5); // 2.1 s
     expect(feeder.countdown).toBe(2);
-    clock.run(0.5); // 2.6 s
+    game.run(0.5); // 2.6 s
     expect(feeder.countdown).toBe(1);
     expect(feeds).toHaveLength(0);
 
-    clock.run(0.5); // 3.1 s
+    game.run(0.5); // 3.1 s
     expect(feeder.phase).toBe('feeding');
     expect(feeder.countdown).toBeNull();
     expect(feeds).toHaveLength(1);
@@ -115,35 +118,72 @@ describe('Feeder scheduling', () => {
     let rallyEnds = 0;
     feeder.onFeed((feed) => feeds.push(feed));
     feeder.onRallyEnd(() => rallyEnds++);
-    const clock = driver(feeder);
-    clock.run(3.1);
+    const game = driver(feeder);
+    game.run(3.1);
     expect(feeds).toHaveLength(1);
 
-    clock.run(5); // the Feed (or a Return replacing it) is still live
+    game.run(5); // the Feed (or a Return replacing it) is still live
     expect(feeder.phase).toBe('feeding');
     expect(rallyEnds).toBe(0);
 
-    clock.setBall(OUT_BALL); // the ball went out: rally over
-    clock.run(0.05);
+    game.setBall(OUT_BALL); // the ball went out: rally over
+    game.run(0.05);
     expect(rallyEnds).toBe(1);
     expect(feeder.phase).toBe('waiting');
 
-    clock.run(1.4);
+    game.run(1.4);
     expect(feeder.countdown).toBeNull();
-    clock.run(0.2);
+    game.run(0.2);
     expect(feeder.countdown).toBe(3);
-    clock.run(1.5);
+    game.run(1.5);
     expect(feeds).toHaveLength(2);
+  });
+
+  it('keeps the rally on until the Hit Window after the Ideal Time closes, even if the Feed is already out', () => {
+    const feeder = createFeeder({ random: seededRandom(4) });
+    let rallyEnds = 0;
+    feeder.onRallyEnd(() => rallyEnds++);
+    const game = driver(feeder);
+    game.run(3.1);
+    const feed = feeder.currentFeed!;
+    const windowClosesAtMs = feed.idealAtMs! + HIT_WINDOW_MS.value;
+
+    game.setBall(OUT_BALL); // the Feed dropped past the end, but a late Swing could still return it
+    game.run((windowClosesAtMs - 100 - game.nowMs) / 1000);
+    expect(rallyEnds).toBe(0);
+    expect(feeder.phase).toBe('feeding');
+
+    game.run(0.2);
+    expect(rallyEnds).toBe(1);
+    expect(feeder.phase).toBe('waiting');
+  });
+
+  it('does not take a ball at the top of a bounce for one at rest', () => {
+    const feeder = createFeeder({ random: seededRandom(5) });
+    let rallyEnds = 0;
+    feeder.onRallyEnd(() => rallyEnds++);
+    const game = driver(feeder);
+    game.run(3.1);
+    game.run(3); // past the Hit Window
+
+    game.setBall(launchBall({ x: 0, y: FEEDER_MOUTH.y, z: 0.7 }, { x: 0, y: 0, z: 0 })); // a live ball at its apex
+    game.run(0.1);
+    expect(rallyEnds).toBe(0);
+
+    game.setBall({ ...launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 }, { x: 0, y: 0, z: 0 }), lastBounceHalf: 'player' }); // settled on the table
+    game.run(0.1);
+    expect(rallyEnds).toBe(1);
   });
 
   it('cuts the Feed flight time by about 5% for every 10 Returns in the Streak, and restores it when the Streak resets', () => {
     const feeder = createFeeder({ random: seededRandom(3) });
     const feeds: Feed[] = [];
     feeder.onFeed((feed) => feeds.push(feed));
-    const clock = driver(feeder);
+    const game = driver(feeder);
     const nextFeed = () => {
-      clock.setBall(OUT_BALL); // end any rally in progress
-      clock.run(3.1);
+      const count = feeds.length;
+      game.setBall(OUT_BALL); // end any rally in progress (once its Hit Window has closed)
+      for (let i = 0; i < 400 && feeds.length === count; i++) game.run(0.05);
       return feeds.at(-1)!;
     };
 

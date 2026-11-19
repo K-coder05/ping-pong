@@ -8,8 +8,8 @@
  * integrator, so the actual ball (with drag) lands where it was aimed.
  */
 
-import { launchBall, simulate, type Vec3 } from './ball.ts';
-import { BALL_RADIUS, GRAVITY, NET_HEIGHT, TABLE_TOP_Y } from './constants.ts';
+import { launchBall, simulate, type BallEvent, type BallState, type Vec3 } from './ball.ts';
+import { ARC_RAISE_FACTOR, BALL_RADIUS, GRAVITY, NET_CLEARANCE, NET_HEIGHT, TABLE_TOP_Y } from './constants.ts';
 
 /** A spot on the table top (or its plane, for a deliberate miss off the table). */
 export interface TablePoint {
@@ -28,10 +28,6 @@ const LANDING_Y = TABLE_TOP_Y + BALL_RADIUS;
 const DRAG_CORRECTIONS = 8;
 /** Stop correcting once the simulated landing is this close to the target, metres. */
 const LANDING_TOLERANCE = 0.001;
-/** Minimum gap between the ball's bottom and the net top as it crosses z = 0, metres. */
-export const NET_CLEARANCE = 0.05;
-/** Each raise lengthens the flight time by this factor (a higher, slower arc). */
-const ARC_RAISE_FACTOR = 1.1;
 /** Enough raises to more than triple the flight time; past that, give up and return the last try. */
 const MAX_ARC_RAISES = 12;
 const NET_TOP_Y = TABLE_TOP_Y + NET_HEIGHT;
@@ -91,7 +87,7 @@ function clearsNet(from: Vec3, velocity: Vec3): boolean {
       previous = state;
       if (before.z !== 0 && Math.sign(after.z) === Math.sign(before.z)) {
         // Not crossed yet; stop once the ball lands or drops to table height off the table.
-        return events.some((e) => e.type === 'bounce') || after.y <= LANDING_Y;
+        return hasLanded(state, events);
       }
       const f = before.z / (before.z - after.z);
       const crossingY = before.y + f * (after.y - before.y);
@@ -106,8 +102,17 @@ function clearsNet(from: Vec3, velocity: Vec3): boolean {
 function landingPoint(from: Vec3, velocity: Vec3, flightTime: number): Vec3 {
   const run = simulate(launchBall(from, velocity), {
     maxTime: 3 * flightTime + 1,
-    until: (state, _time, events) => events.some((e) => e.type === 'bounce') || state.position.y <= LANDING_Y,
+    until: (state, _time, events) => hasLanded(state, events),
   });
   const bounce = run.events.find((e) => e.event.type === 'bounce');
   return bounce ? bounce.event.position : run.state.position;
+}
+
+/**
+ * The ball bounced on the table this substep, or is coming down through table
+ * height off it. Only on the way down: a shot struck below table height (a
+ * late Return) starts under LANDING_Y and must rise first.
+ */
+function hasLanded(state: BallState, events: readonly BallEvent[]): boolean {
+  return events.some((e) => e.type === 'bounce') || (state.velocity.y < 0 && state.position.y <= LANDING_Y);
 }

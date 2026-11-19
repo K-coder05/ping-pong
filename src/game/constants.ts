@@ -38,6 +38,15 @@ export const BALL_RADIUS = 0.02; // physics radius; see BALL_DRAW_SCALE
 export const BALL_MASS = 0.0027;
 
 // ---------------------------------------------------------------------------
+// Target solver (shared by Feeds and Returns)
+// ---------------------------------------------------------------------------
+
+/** Minimum gap between the ball's bottom and the net top as it crosses z = 0, metres. */
+export const NET_CLEARANCE = 0.05;
+/** When a shot won't clear the net, its flight time is lengthened by this factor (a higher arc) and solved again. */
+export const ARC_RAISE_FACTOR = 1.1;
+
+// ---------------------------------------------------------------------------
 // Feeder (fixed rules; its timing guesses are knobs below)
 // ---------------------------------------------------------------------------
 

@@ -11,11 +11,13 @@
  * hands each Feed's launched ball to `onFeed` listeners (the game loop makes
  * it the ball in play) and watches whatever ball it is given each frame, so a
  * Return that replaces the Feed mid-rally needs no Feeder call. The rally ends
- * when that ball is no longer live (net, out) or has come to rest.
+ * when that ball is no longer live (net, out) or has come to rest on the
+ * table, but never before the Feed's Hit Window has closed.
  */
 
 import { launchBall, simulate, type BallState, type Vec3 } from './ball.ts';
 import {
+  BALL_RADIUS,
   FEED_COUNTDOWN_FROM,
   FEED_COUNTDOWN_STEP_S,
   FEED_FLIGHT_TIME_S,
@@ -26,8 +28,10 @@ import {
   FEED_TARGET_Z_MAX,
   FEED_TARGET_Z_MIN,
   FEEDER_MOUTH,
+  HIT_WINDOW_MS,
   PHYSICS_DT,
   PLAYER_END_Z,
+  TABLE_TOP_Y,
   TIME_SCALE,
 } from './constants.ts';
 import { simSecondsToRealMs } from './simClock.ts';
@@ -35,7 +39,7 @@ import { solveLaunch, type TablePoint } from './solver.ts';
 
 /** When and where a Feed reaches the player's end of the table, after its bounce. */
 export interface IdealTime {
-  /** Simulated seconds after launch. Convert to real time with `simToRealMs`. */
+  /** Simulated seconds after launch. Convert to real time with `simSecondsToRealMs`. */
   simSeconds: number;
   /** Ball centre as it crosses z = PLAYER_END_Z. */
   position: Vec3;
@@ -79,7 +83,11 @@ export interface Feed {
   readonly ball: BallState;
   /** Where it was aimed to land on the player's half. */
   readonly target: TablePoint;
-  /** Flight time to the landing, in simulated seconds (the solver may have raised the arc). */
+  /**
+   * The flight time the solver aimed with, in simulated seconds (raised if the
+   * arc had to clear the net). A pace setting, not a timestamp: drag makes the
+   * real landing a few percent earlier. For timing, use `idealTime`.
+   */
   readonly flightTime: number;
   /** When and where it reaches the player's end; null only if it never would (extreme knob values). */
   readonly idealTime: IdealTime | null;
@@ -116,13 +124,17 @@ export interface Feeder {
   /** Advance by one frame. `ball` is the ball in play after this frame's physics. */
   update(frame: FeederFrame, ball: BallState): void;
   /**
-   * Tell the Feeder the current Streak: every FEED_SPEEDUP_EVERY Returns, later
-   * Feeds fly FEED_SPEEDUP_FACTOR faster; a reset Streak restores the base pace.
+   * Tell the Feeder the current Streak: every FEED_SPEEDUP_EVERY Returns, the
+   * flight time of later Feeds is multiplied by FEED_SPEEDUP_FACTOR (about 5%
+   * shorter); a reset Streak restores the base pace.
    */
   setStreak(streak: number): void;
   /** Called when a Feed launches. Returns an unsubscribe function. */
   onFeed(listener: (feed: Feed) => void): () => void;
-  /** Called when the rally ends (the ball in play is no longer live or has stopped). Returns an unsubscribe function. */
+  /**
+   * Called when the rally ends: the ball in play is no longer live or has
+   * stopped, and the Feed's Hit Window has closed. Returns an unsubscribe function.
+   */
   onRallyEnd(listener: (ball: BallState) => void): () => void;
 }
 
@@ -131,8 +143,10 @@ export interface FeederOptions {
   random?: () => number;
 }
 
-/** Below this speed (m/s) a live ball has come to rest and the rally is over. */
+/** Below this speed (m/s), on the table, a live ball has come to rest and the rally is over. */
 const AT_REST_SPEED = 0.05;
+/** How close (m) the ball's bottom must be to the table top to count as resting on it. */
+const AT_REST_HEIGHT = 0.001;
 
 export function createFeeder(options: FeederOptions = {}): Feeder {
   const random = options.random ?? Math.random;
@@ -180,7 +194,7 @@ export function createFeeder(options: FeederOptions = {}): Feeder {
     update(frame, ball) {
       if (phase === 'feeding') {
         simSecondsSinceFeed += frame.simSeconds;
-        if (rallyIsOver(ball)) endRally(ball);
+        if (ballIsDone(ball) && !hitWindowIsOpen(currentFeed, frame.nowMs)) endRally(ball);
         return;
       }
       phaseSeconds += frame.realSeconds;
@@ -206,9 +220,21 @@ export function createFeeder(options: FeederOptions = {}): Feeder {
   };
 }
 
-function rallyIsOver(ball: BallState): boolean {
+/** The ball in play can do nothing more: dead or out, or come to rest on the table. */
+function ballIsDone(ball: BallState): boolean {
+  if (ball.status !== 'live') return true;
   const { x, y, z } = ball.velocity;
-  return ball.status !== 'live' || Math.hypot(x, y, z) < AT_REST_SPEED;
+  const onTable = ball.position.y <= TABLE_TOP_Y + BALL_RADIUS + AT_REST_HEIGHT;
+  return onTable && Math.hypot(x, y, z) < AT_REST_SPEED;
+}
+
+/**
+ * Whether a Swing could still return the Feed: until HIT_WINDOW_MS after its
+ * Ideal Time. A Feed is out moments after it passes the player's end, but a
+ * late Swing launches the Return from wherever the ball is, so the rally waits.
+ */
+function hitWindowIsOpen(feed: Feed | null, nowMs: number): boolean {
+  return feed?.idealAtMs != null && nowMs < feed.idealAtMs + HIT_WINDOW_MS.value;
 }
 
 /** A Feed to a random spot on the player's half, solved for `flightTime` and launched at `nowMs`. */
