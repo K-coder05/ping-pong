@@ -10,6 +10,14 @@ export interface SimClock {
   advance(frameSeconds: number, timeScale: number): number;
 }
 
+/**
+ * Real milliseconds that `simSeconds` of simulation take at `timeScale`: how to
+ * put a simulated moment (e.g. a Feed's Ideal Time) on the performance.now() clock.
+ */
+export function simSecondsToRealMs(simSeconds: number, timeScale: number): number {
+  return (simSeconds / timeScale) * 1000;
+}
+
 /** Tolerance so float noise (1/60 − 3·(1/240) ≈ 1/240 − ε) doesn't drop a substep. */
 const EPSILON = 1e-9;
 

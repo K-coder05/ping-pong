@@ -38,6 +38,34 @@ export const BALL_RADIUS = 0.02; // physics radius; see BALL_DRAW_SCALE
 export const BALL_MASS = 0.0027;
 
 // ---------------------------------------------------------------------------
+// Target solver (shared by Feeds and Returns)
+// ---------------------------------------------------------------------------
+
+/** Minimum gap between the ball's bottom and the net top as it crosses z = 0, metres. */
+export const NET_CLEARANCE = 0.05;
+/** When a shot won't clear the net, its flight time is lengthened by this factor (a higher arc) and solved again. */
+export const ARC_RAISE_FACTOR = 1.1;
+
+// ---------------------------------------------------------------------------
+// Feeder (fixed rules; its timing guesses are knobs below)
+// ---------------------------------------------------------------------------
+
+/** Where the Feeder launches each Feed: its far end line, about 0.3 m above the table. */
+export const FEEDER_MOUTH = { x: 0, y: TABLE_TOP_Y + 0.3, z: FEEDER_END_Z } as const;
+/** Feed landing targets: x within ±this, metres. */
+export const FEED_TARGET_HALF_WIDTH = 0.5;
+/** Feed landing targets: z from this ... */
+export const FEED_TARGET_Z_MIN = 0.5;
+/** ... to this, on the player's half. */
+export const FEED_TARGET_Z_MAX = 1.0;
+/** Every this many Returns in the Streak, Feeds get faster ... */
+export const FEED_SPEEDUP_EVERY = 10;
+/** ... by multiplying the flight time by this. */
+export const FEED_SPEEDUP_FACTOR = 0.95;
+/** The "3, 2, 1" cue before each Feed counts down from this. */
+export const FEED_COUNTDOWN_FROM = 3;
+
+// ---------------------------------------------------------------------------
 // Physics (fixed facts; tuning guesses are knobs below)
 // ---------------------------------------------------------------------------
 
@@ -93,8 +121,16 @@ export const EARLY_SWING_USES_TRY = knobs.toggle({ name: 'EARLY_SWING_USES_TRY',
 /** Global slow-motion factor for the whole simulation. */
 export const TIME_SCALE = knobs.number({ name: 'TIME_SCALE', min: 0.2, max: 1.5, step: 0.05, default: 0.8, group: 'Timing' });
 
-/** Flight time T of a Feed, before the Streak speed-up. */
-export const FEED_FLIGHT_TIME_S = knobs.number({ name: 'FEED_FLIGHT_TIME_S', min: 0.4, max: 2, step: 0.05, default: 1, group: 'Feeder' });
+/**
+ * Flight time T of a Feed, before the Streak speed-up. Capped at 1.1 s: from
+ * 0.3 m up, a slower Feed is such a high lob that a short one bounces twice
+ * on the player's half. To slow play further, lower TIME_SCALE.
+ */
+export const FEED_FLIGHT_TIME_S = knobs.number({ name: 'FEED_FLIGHT_TIME_S', min: 0.4, max: 1.1, step: 0.05, default: 1, group: 'Feeder' });
+/** Real seconds between a rally ending and the "3, 2, 1" cue starting. */
+export const FEED_PAUSE_S = knobs.number({ name: 'FEED_PAUSE_S', min: 0, max: 5, step: 0.1, default: 1.5, group: 'Feeder' });
+/** Real seconds each number of the "3, 2, 1" cue stays up. */
+export const FEED_COUNTDOWN_STEP_S = knobs.number({ name: 'FEED_COUNTDOWN_STEP_S', min: 0.2, max: 1.5, step: 0.05, default: 0.5, group: 'Feeder' });
 
 /** Horizontal speed kept by a table bounce (friction). */
 export const BOUNCE_FRICTION = knobs.number({ name: 'BOUNCE_FRICTION', min: 0.5, max: 1, step: 0.01, default: 0.9, group: 'Physics' });
@@ -111,6 +147,8 @@ export const TRACKING_MIN_VISIBILITY = 0.5;
 
 /** Ball drawn this many times its physics radius, so it's readable from 2 m. */
 export const BALL_DRAW_SCALE = knobs.number({ name: 'BALL_DRAW_SCALE', min: 1, max: 4, step: 0.1, default: 2, group: 'Render' });
+/** Debug marker where (and, by lighting up, when) each Feed reaches its Ideal Time. */
+export const SHOW_IDEAL_TIME_MARKER = knobs.toggle({ name: 'SHOW_IDEAL_TIME_MARKER', default: true, group: 'Render' });
 
 /** Shoulder widths of wrist travel that span the table's width. */
 export const PADDLE_MAPPING_RANGE = knobs.number({ name: 'PADDLE_MAPPING_RANGE', min: 0.5, max: 4, step: 0.1, default: 2, group: 'Paddle' });
