@@ -53,7 +53,8 @@ export interface MouseSwingTracker {
 }
 
 export function createMouseSwingTracker(options: MouseSwingTrackerOptions): MouseSwingTracker {
-  const detector = createSwingDetector(options.params);
+  // A drag needn't rise: the rise rule is about how real arms move (#12).
+  const detector = createSwingDetector(() => ({ ...options.params(), minRise: undefined }));
   let hand: Hand | null = null;
 
   function detect(sample: PointerSample): SwingEvent | null {

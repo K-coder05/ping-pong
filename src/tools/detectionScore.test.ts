@@ -20,6 +20,14 @@ describe('scoreSession', () => {
     expect(scoreSession({ tickTimes: [1000], onsets: [900, 1200], idle }).detected).toBe(0);
   });
 
+  it("centres each window on the tick plus the player's Timing Offset", () => {
+    // Onsets a steady ~390 ms after each tick (#12): missed raw, detected with the offset.
+    const session = { tickTimes: [1000, 3000], onsets: [1390, 3560], idle };
+    expect(scoreSession(session).detected).toBe(0);
+    expect(scoreSession({ ...session, timingOffsetMs: 390 }).detected).toBe(2);
+    expect(scoreSession({ tickTimes: [1000], onsets: [1000], idle, timingOffsetMs: 390 }).detected).toBe(0);
+  });
+
   it('does not count a tick with no Onset', () => {
     expect(scoreSession({ tickTimes: [1000], onsets: [], idle }).detected).toBe(0);
   });

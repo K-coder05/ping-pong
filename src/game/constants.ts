@@ -105,14 +105,30 @@ export const PLAY_CAMERA_TARGET = { x: 0, y: TABLE_TOP_Y, z: -0.3 } as const;
 // Tuning knobs (SPEC "Tuning knobs and open questions"; all starting guesses)
 // ---------------------------------------------------------------------------
 
-/** Stroke speed that starts a Swing, in shoulder widths per second. */
-export const SWING_ON = knobs.number({ name: 'SWING_ON', min: 0.5, max: 10, step: 0.1, default: 3, group: 'Swing' });
+/**
+ * Stroke speed that starts a Swing, in shoulder widths per second. Tuned from
+ * logs (#12): Backswings re-smoothed at `ONE_EURO_BETA` 10 reached about 4.4;
+ * the softest real Swing was 5.5.
+ */
+export const SWING_ON = knobs.number({ name: 'SWING_ON', min: 0.5, max: 10, step: 0.1, default: 5.2, group: 'Swing' });
 /** Total wrist speed that counts as a full-power Swing, shoulder widths/s. */
 export const SWING_FAST = knobs.number({ name: 'SWING_FAST', min: 2, max: 20, step: 0.5, default: 8, group: 'Swing' });
-/** Wrist speed below which a new Swing is re-armed, shoulder widths/s. */
-export const SWING_OFF = knobs.number({ name: 'SWING_OFF', min: 0.1, max: 5, step: 0.1, default: 1, group: 'Swing' });
-/** Time after a Swing Onset during which new Onsets are ignored. */
-export const SWING_COOLDOWN_MS = knobs.number({ name: 'SWING_COOLDOWN_MS', min: 100, max: 1000, step: 10, default: 400, group: 'Swing' });
+/**
+ * Speed along the body axis below which the wrist counts as stopped, shoulder
+ * widths/s: a stop or turn back ends a stroke and re-arms the detector. A
+ * resting wrist logged under 0.05.
+ */
+export const SWING_OFF = knobs.number({ name: 'SWING_OFF', min: 0.1, max: 5, step: 0.1, default: 0.5, group: 'Swing' });
+/** Time after a Swing Onset during which new Onsets are ignored; 700 ms covers the follow-through's return (#12). */
+export const SWING_COOLDOWN_MS = knobs.number({ name: 'SWING_COOLDOWN_MS', min: 100, max: 1000, step: 10, default: 700, group: 'Swing' });
+/**
+ * Upward wrist speed needed at Onset, shoulder widths/s (pose only). Tuned from
+ * logs (#12): real Swings rose at 0.6 or more (nearly all above 1.6), while the
+ * return to ready position and sliding across between Forehand and Backhand
+ * ready were flat or falling (at most 0.9, mostly below 0). Most of those logs
+ * were recorded at the old `ONE_EURO_BETA` 0.01; recheck on new recordings.
+ */
+export const SWING_MIN_RISE = knobs.number({ name: 'SWING_MIN_RISE', min: -5, max: 5, step: 0.1, default: 0.5, group: 'Swing' });
 
 /** Half-width W of the Hit Window around the Ideal Time. */
 export const HIT_WINDOW_MS = knobs.number({ name: 'HIT_WINDOW_MS', min: 50, max: 400, step: 10, default: 200, group: 'Timing' });
@@ -169,8 +185,12 @@ export const MOUSE_SHOULDER_WIDTH = knobs.number({ name: 'MOUSE_SHOULDER_WIDTH',
 
 /** One Euro filter cutoff at rest, Hz. */
 export const ONE_EURO_MIN_CUTOFF = knobs.number({ name: 'ONE_EURO_MIN_CUTOFF', min: 0.1, max: 5, step: 0.1, default: 1, group: 'Smoothing' });
-/** One Euro filter speed coefficient. */
-export const ONE_EURO_BETA = knobs.number({ name: 'ONE_EURO_BETA', min: 0, max: 0.1, step: 0.001, default: 0.01, group: 'Smoothing' });
+/**
+ * One Euro filter speed coefficient, Hz per (normalized image unit / s). A Swing
+ * moves the wrist about 1–3 image widths/s, so 10 lifts the cutoff to 10–30 Hz
+ * mid-Swing; 0.01 left it near 1 Hz and blunted every Swing (#12).
+ */
+export const ONE_EURO_BETA = knobs.number({ name: 'ONE_EURO_BETA', min: 0, max: 30, step: 0.5, default: 10, group: 'Smoothing' });
 /** Hitting-wrist visibility below which the wrist counts as lost (tracking-loss banner). */
 export const TRACKING_MIN_VISIBILITY = knobs.number({ name: 'TRACKING_MIN_VISIBILITY', min: 0.1, max: 0.9, step: 0.05, default: 0.5, group: 'Tracking' });
 /** The hitting wrist is lost after more than this many camera frames in a row below `TRACKING_MIN_VISIBILITY` (~170 ms at 30 FPS). */

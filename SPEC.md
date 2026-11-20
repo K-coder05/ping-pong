@@ -142,7 +142,7 @@ VIDEO mode is the documented way to process live webcam frames on the web. It re
 
 **Smoothing: One Euro filter**
 
-Apply a One Euro filter to each coordinate of the hitting wrist (and the shoulders). It is an adaptive low-pass filter: `minCutoff` removes jitter when the hand is still, and `beta` raises the cutoff as speed rises so fast swings are not delayed. Start around `minCutoff = 1.0` Hz and `beta = 0.01`, then tune by eye with the debug overlay ([reference](https://gery.casiez.net/1euro/)). Those numbers are starting guesses, not researched values.
+Apply a One Euro filter to each coordinate of the hitting wrist (and the shoulders). It is an adaptive low-pass filter: `minCutoff` removes jitter when the hand is still, and `beta` raises the cutoff as speed rises so fast swings are not delayed ([reference](https://gery.casiez.net/1euro/)). Use `minCutoff = 1.0` Hz and `beta = 10`, tuned from logs (#12). `beta` multiplies speed in normalized image units per second, and a Swing moves the wrist about 1–3 image widths per second, so `beta = 10` lifts the cutoff to 10–30 Hz mid-Swing. The original guess of `0.01` left it near 1 Hz, which blunted every Swing and delayed Onset by a frame.
 
 **Tracking loss**: if the hitting wrist's `visibility` drops below about 0.5 for more than a few frames, pause the Feeder and show a "Can't see your hand" banner.
 
@@ -168,12 +168,12 @@ export interface SwingEvent {
 1. Take the smoothed hitting wrist `w`, the hitting-side shoulder `H` and the other shoulder `N` (normalized image coordinates).
 2. Body scale: `sw = |H − N|` (shoulder width). Origin: `mid = (H + N) / 2`. Body axis: `a = (H − N) / sw`, a unit vector pointing toward the hitting side.
 3. Normalized wrist position: `p = (w − mid) / sw`. This makes thresholds work for kids and adults at any distance from the laptop.
-4. Velocity: `v = (p − pPrev) / dt`, with `dt` from frame timestamps (not an assumed 1/30 s). Total speed `s = |v|`.
+4. Velocity: `v = (w − wPrev) / (dt · sw)`, the wrist's own movement across the image in shoulder widths per second, with `dt` from frame timestamps (not an assumed 1/30 s). Total speed `s = |v|`. Do not difference `p`: when the torso turns for a Backswing, the shoulders' on-screen width shrinks to a fraction and their midpoint shifts, and as it unwinds `p` races back toward the midline while the wrist barely moves. In the #12 logs, that alone fired 13 false Swings from Backswings.
 5. Side: `u = p · a`. Forehand if `u > 0` (wrist on the hitting side), Backhand otherwise. Working along the body axis means you never have to think about which way the image is mirrored.
-6. **Stroke speed**: `uDot = v · a`. A Forehand sweeps toward the non-hitting side, so `sStroke = −uDot`; a Backhand sweeps toward the hitting side, so `sStroke = +uDot`. Backswings and mostly vertical movements (lowering your arm, scratching your head) give a stroke speed near zero or below.
-7. **Onset**: if `sStroke > SWING_ON` for 2 consecutive frames and you are not in the cooldown, emit a `SwingEvent`. Start with `SWING_ON = 3` and tune from logged data; this is a guess.
-8. **Cooldown**: ignore new onsets for about 400 ms so one Swing never fires twice.
-9. **Re-arm**: require `s < SWING_OFF` (about 1) once before the next Swing, so a hand that never stops does not chain-fire.
+6. **Stroke speed**: `uDot = v · a`. A Forehand sweeps toward the non-hitting side, so `sStroke = −uDot`; a Backhand sweeps toward the hitting side, so `sStroke = +uDot`. Pick Forehand or Backhand from `u` where the current movement started: the wrist's last stop or change of direction along the body axis (`|uDot| < SWING_OFF` counts as stopped). A Forehand starts at the far end of its Backswing; a Backhand starts wherever the wrist was before it swept out, even just across the midline. At 20–30 FPS a fast stroke that starts near the midline can show only one frame on its own side before it crosses, so the current frame's side is not enough. The Swing's side is that side too. Backswings and mostly vertical movements (lowering your arm, scratching your head) give a stroke speed near zero or below.
+7. **Onset**: if `sStroke > SWING_ON` for 2 consecutive frames, the wrist is rising faster than `SWING_MIN_RISE` on the second, and you are not in the cooldown, emit a `SwingEvent`. `SWING_ON = 5.2`, tuned from logs (#12): the softest real Swing was 5.5, and Backswings re-smoothed at `beta = 10` reached about 4.4. With the rise rule, nothing from Backswings or standing and talking fires even at 4.0, but most of those logs were recorded at the old `beta = 0.01`, so recheck on new recordings before lowering it. `SWING_MIN_RISE = 0.5` shoulder widths/s: real Forehands and Backhands rise (0.6 or more, nearly all above 1.6), while the return to ready position after a Swing, and sliding across between Forehand and Backhand ready, are flat or falling (0.9 at most, mostly below 0). In the #12 detection test such a slide fired just before a real Forehand, and its cooldown swallowed the Swing. A flat or falling stroke is ignored and does not start the cooldown. So a downward chop or push is not a Swing. Mouse mode needs no rise.
+8. **Cooldown**: ignore new onsets for 700 ms so one Swing never fires twice. 400 ms let the follow-through's return fire as a second Swing about 0.6 s later.
+9. **Re-arm**: the next Swing needs the stroke that fired to have ended: the wrist stopped or turned back along the body axis (`|uDot| < SWING_OFF`, 0.5, or a change of direction), so one long stroke never fires twice. A resting wrist logs under 0.05. Do not wait for total speed `s < SWING_OFF`: in real play the follow-through flows into the return to ready and the next Backswing without the wrist ever stopping, and that rule missed 5 of 20 Swings in the #12 detection test.
 
 Ask handedness once at startup and save it in `localStorage` (wrapped in try/catch).
 
@@ -321,9 +321,11 @@ Measure your real motion-to-screen delay before tuning anything. The research on
 
 **Detection test** (`tools/detectionTest.ts`, run once per tester, separate from play)
 
-1. The same metronome ticks 20 times; the tester swings on each tick. A tick counts as detected if exactly one Swing Onset falls within ±300 ms of it.
+1. The same metronome ticks 20 times; the tester swings on each tick. A tick counts as detected if exactly one Swing Onset falls within ±300 ms of the tick plus the tester's Timing Offset from calibration (0 if not calibrated), because that is when the game expects to see a Swing made on the tick. Without it, the ~400 ms between a tick and its Onset (reaction plus camera lag) scored a fully detected run as 0/20 (#12).
 2. Then 60 s of standing and talking normally; every Onset counts as a false trigger.
 3. Record detected/20 and false triggers per minute in the playtest log. This is the ground truth for the Detection criterion.
+
+**Log replay** (`npm run replay -- pose_csvs/*.csv [--swing-on 4.5] [--min-rise 0.5] [--offset 390] …`, #12): feeds downloaded CSVs (debug overlay or detection test) back through the real pose input and Swing detector with any thresholds, and prints each log's Onsets and, for a detection test, its score and how long after each tick its Onsets came. Tune and check detector changes against recorded sessions with it instead of re-recording. It replays the logged smoothed wrist and shoulders, so its numbers reflect the One Euro settings the log was recorded with (logs before #12's `beta = 10` were smoothed at 0.01), and One Euro changes still need a new recording. The detection test logs each tick's exact time (`tickTime`); older logs fall back to the first frame after the tick, up to one frame late.
 
 **Onboarding for the prototype** (you sit next to each tester, so keep it minimal)
 
@@ -375,15 +377,16 @@ Every number below is a starting guess. Put them all in `constants.ts` with an o
 
 | Knob | Start | Raise it if | Lower it if |
 | --- | --- | --- | --- |
-| `SWING_ON` (stroke speed, shoulder widths/s) | 3 | Idle movement or talking triggers Swings | Real Swings are missed |
+| `SWING_ON` (stroke speed, shoulder widths/s) | 5.2 (tuned, #12) | Idle movement or talking triggers Swings | Real Swings are missed |
+| `SWING_MIN_RISE` (upward speed at Onset, shoulder widths/s) | 0.5 (tuned, #12) | Returns to ready position trigger Swings | Flat real Swings are missed |
 | `SWING_FAST` (total speed, shoulder widths/s) | 8 | Every Swing comes out at full power | Players can't reach full power |
-| Cooldown | 400 ms | One Swing fires twice | Quick re-swings get ignored |
+| Cooldown | 700 ms (tuned, #12) | One Swing fires twice | Quick re-swings get ignored |
 | Hit Window `W` | 200 ms | Players feel robbed | It feels automatic, with no skill |
 | Timing Offset | Measured | n/a | n/a |
 | Feed flight time `T` | 1.0 s | Players can't keep up | It feels sluggish |
 | `TIME_SCALE` | 0.8 | It feels sluggish | Players can't keep up |
 | One Euro `minCutoff` | 1.0 Hz | The Paddle lags at rest | The Paddle jitters while still |
-| One Euro `beta` | 0.01 | The Paddle lags during fast swings | The Paddle jitters during swings |
+| One Euro `beta` | 10 (tuned, #12) | The Paddle lags during fast swings | The Paddle jitters during swings |
 | Direction spread | 0.6 m | Returns all go to the middle | Too many go wide |
 | `BALL_DRAW_SCALE` | 2× | Players lose the ball | The ball looks cartoonish |
 | Paddle mapping range | ±2 shoulder widths | The Paddle hits the table edges too easily | Players must reach too far |

@@ -128,6 +128,50 @@ describe('swing detector', () => {
     });
   }
 
+  it('never fires when the torso turns for a Backswing and unwinds while the wrist stays put', () => {
+    // From the #12 logs: turning side-on shrinks the shoulder width on screen
+    // to a fraction of its size and shifts the midpoint. Unwinding brings both
+    // back fast, which moves the wrist relative to the midline even though the
+    // wrist itself barely moves.
+    const wrist = { x: 0.12, y: 0.55 };
+    const at = (i: number, halfWidth: number, midX: number): SwingDetectorInput => ({
+      t: 1000 + i * 43,
+      wrist: { x: wrist.x + i * 0.001, y: wrist.y },
+      hittingShoulder: { x: midX - halfWidth, y: 0.4 },
+      otherShoulder: { x: midX + halfWidth, y: 0.4 },
+    });
+    const turned = [0.1, 0.1, 0.1, 0.1, 0.06, 0.03, 0.015, 0.015, 0.015];
+    const unwinding = [0.03, 0.05, 0.07, 0.09, 0.1, 0.1, 0.1];
+    const frames = [...turned, ...unwinding].map((halfWidth, i) => at(i, halfWidth, 0.5 + (0.1 - halfWidth) * 0.5));
+    expect(run(frames)).toEqual([]);
+  });
+
+  describe('a fast stroke that crosses the midline between frames (~23 FPS)', () => {
+    const FRAME_23_FPS = 43;
+
+    it('fires a Forehand on the frame it crosses', () => {
+      const frames = framesFor({ hand: 'right' }, [{ u: 1.5, up: 0 }, { u: 1.5, up: 0 }, { u: 0.6, up: 0 }, { u: -0.4, up: 0 }, { u: -1, up: 0 }], 1000, FRAME_23_FPS);
+      const swings = run(frames);
+      expect(swings).toHaveLength(1);
+      expect(swings[0]).toMatchObject({ t: frames[3]!.t, side: 'forehand' });
+    });
+
+    it('fires a Backhand that starts at the midline and is only one frame on the Backhand side', () => {
+      // From the #12 detection test: Backhand ready position just across the midline, no Backswing.
+      const frames = framesFor({ hand: 'right' }, [{ u: -0.1, up: 0 }, { u: -0.1, up: 0 }, { u: 0.2, up: 0 }, { u: 0.6, up: 0 }, { u: 1, up: 0 }, { u: 1.4, up: 0 }], 1000, FRAME_23_FPS);
+      const swings = run(frames);
+      expect(swings).toHaveLength(1);
+      expect(swings[0]).toMatchObject({ t: frames[3]!.t, side: 'backhand' });
+    });
+
+    it('fires a Backhand on the frame it crosses', () => {
+      const frames = framesFor({ hand: 'left' }, [{ u: -1.2, up: 0 }, { u: -1.2, up: 0 }, { u: -0.3, up: 0 }, { u: 0.7, up: 0 }, { u: 1.3, up: 0 }], 1000, FRAME_23_FPS);
+      const swings = run(frames);
+      expect(swings).toHaveLength(1);
+      expect(swings[0]).toMatchObject({ t: frames[3]!.t, side: 'backhand' });
+    });
+  });
+
   it('gives the same Swings whether or not the image is mirrored', () => {
     for (const stroke of [FOREHAND, BACKHAND]) {
       expectSameSwings(run(framesFor({ hand: 'right', mirrored: true }, stroke)), run(framesFor({ hand: 'right' }, stroke)));
@@ -184,6 +228,33 @@ describe('swing detector', () => {
     expect(down?.vertPath).toBeCloseTo(-5);
   });
 
+  describe('with a minimum rise at Onset', () => {
+    const RISING = { ...PARAMS, minRise: 0.5 };
+    /** A fast Forehand sweep (10 sw/s) that moves up by `rise` shoulder widths over its 200 ms. */
+    const sweep = (rise: number) => path({ u: 1.5, up: 0 }, stay(100), to({ u: -0.5, up: rise }, 200), stay(300));
+
+    it('fires when the wrist rises faster than the minimum at Onset', () => {
+      expect(run(framesFor({ hand: 'right' }, sweep(0.2)), RISING)).toHaveLength(1); // 1 sw/s up
+    });
+
+    it('never fires on a flat or falling stroke, like a return to ready position', () => {
+      expect(run(framesFor({ hand: 'right' }, sweep(0)), RISING)).toEqual([]);
+      expect(run(framesFor({ hand: 'left' }, sweep(-0.4)), RISING)).toEqual([]);
+    });
+
+    it('does not let a rejected stroke start the cooldown', () => {
+      // From the #12 detection test: sliding across to Forehand ready at waist height,
+      // then the real Forehand 500 ms later.
+      const slideThenSwing = path({ u: -0.5, up: -1 }, stay(100), to({ u: 1.5, up: -1 }, 250), to({ u: 2, up: -1.2 }, 250), to({ u: -0.5, up: 0 }, 200), stay(300));
+      const swings = run(framesFor({ hand: 'right' }, slideThenSwing), { ...RISING, cooldownMs: 700 });
+      expect(swings.map((swing) => swing.side)).toEqual(['forehand']);
+    });
+
+    it('needs no rise when no minimum is set (mouse mode)', () => {
+      expect(run(framesFor({ hand: 'right' }, sweep(0)))).toHaveLength(1);
+    });
+  });
+
   describe('cooldown and re-arm', () => {
     /** Two Forehand strokes with a full stop between them, the second starting `gapMs` after the first. */
     function twoStrokes(gapMs: number): BodyPoint[] {
@@ -204,11 +275,23 @@ describe('swing detector', () => {
       expect(run(framesFor({ hand: 'right' }, twoStrokes(300)), { ...PARAMS, cooldownMs: 200 })).toHaveLength(2);
     });
 
-    it('does not chain-fire while the wrist never slows below SWING_OFF', () => {
-      // Sweep back and forth across the body at 6 sw/s for 2 s without stopping.
-      const segments = Array.from({ length: 8 }, (_, i) => to({ u: i % 2 === 0 ? -0.7 : 0.8, up: 0 }, 250));
-      const swings = run(framesFor({ hand: 'right' }, path({ u: 0.8, up: 0 }, stay(100), ...segments)));
-      expect(swings).toHaveLength(1);
+    it('re-arms once the stroke ends, even if the wrist never stops before the next one', () => {
+      // From the #12 logs: the follow-through flows into the return to ready and the
+      // Backswing, and on into the next Swing; the wrist never stops in between.
+      const rally = path(
+        { u: 1.5, up: 0 },
+        stay(100),
+        to({ u: -0.5, up: 0 }, 200), // Forehand, 10 sw/s
+        to({ u: 2, up: 0 }, 1000), // back to ready and into the Backswing, 2.5 sw/s
+        to({ u: -0.5, up: 0 }, 250), // Forehand again, 10 sw/s
+        stay(300),
+      );
+      expect(run(framesFor({ hand: 'right' }, rally)).map((swing) => swing.side)).toEqual(['forehand', 'forehand']);
+    });
+
+    it('fires once for a long stroke that slows and speeds up again without ending', () => {
+      const stroke = path({ u: 2, up: 0 }, stay(100), to({ u: 1, up: 0 }, 150), to({ u: 0.8, up: 0 }, 150), to({ u: -0.5, up: 0 }, 150), stay(300));
+      expect(run(framesFor({ hand: 'right' }, stroke), { ...PARAMS, cooldownMs: 100 })).toHaveLength(1);
     });
   });
 

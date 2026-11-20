@@ -26,8 +26,8 @@ const SPEC: ResolverParams = {
 };
 
 describe('knobResolverParams', () => {
-  it('starts from the SPEC values', () => {
-    expect(knobResolverParams()).toEqual(SPEC);
+  it('starts from the SPEC values, with SWING_ON as tuned from the logs (#12)', () => {
+    expect(knobResolverParams()).toEqual({ ...SPEC, swingOn: 5.2 });
   });
 
   it('applies the Timing Offset knob live, so changing it shifts which Swings count as Early or Late', () => {

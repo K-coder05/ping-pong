@@ -43,7 +43,7 @@ The way the wrist must travel for movement to count as a Swing: toward the non-h
 The wind-up movement against the Stroke Direction before a Swing; it is never a Swing.
 
 **Forehand** / **Backhand**:
-The side of a Swing, decided by whether the wrist is on the hitting-hand side of the body's midline at Onset. Side never decides whether a Return succeeds.
+The side of a Swing, decided by which side of the body's midline the wrist was on when the stroke started (its last stop or change of direction), so a fast stroke that has already crossed the midline at Onset keeps its side. Side never decides whether a Return succeeds.
 
 **Paddle**:
 The on-screen bat that follows the player's hitting wrist.

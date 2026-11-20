@@ -1,4 +1,4 @@
-import { SWING_COOLDOWN_MS, SWING_OFF, SWING_ON } from '../game/constants.ts';
+import { SWING_COOLDOWN_MS, SWING_MIN_RISE, SWING_OFF, SWING_ON } from '../game/constants.ts';
 import type { Hand, Point2 } from '../sensing/landmarks.ts';
 import type { SensingFrame } from '../sensing/sensingFrame.ts';
 import { createSwingDetector, type SwingParams, type SwingReading, type Vec2 } from './swingDetector.ts';
@@ -30,7 +30,7 @@ export interface FrameSource {
 }
 
 export interface PoseInputOptions {
-  /** Live thresholds; defaults to the `SWING_ON`, `SWING_OFF` and `SWING_COOLDOWN_MS` knobs. */
+  /** Live thresholds; defaults to the `SWING_*` knobs. */
   params?: () => SwingParams;
   /**
    * Video width / height. MediaPipe normalizes x by width and y by height,
@@ -49,8 +49,13 @@ export interface PoseInputOptions {
  */
 const MIN_SHOULDER_WIDTH = 0.04;
 
-/** Swing detector thresholds from the live `SWING_ON`, `SWING_OFF` and `SWING_COOLDOWN_MS` knobs (pose and mouse). */
-export const knobSwingParams = (): SwingParams => ({ swingOn: SWING_ON.value, swingOff: SWING_OFF.value, cooldownMs: SWING_COOLDOWN_MS.value });
+/** Swing detector thresholds from the live `SWING_*` knobs (pose and mouse; mouse mode ignores `minRise`). */
+export const knobSwingParams = (): SwingParams => ({
+  swingOn: SWING_ON.value,
+  swingOff: SWING_OFF.value,
+  cooldownMs: SWING_COOLDOWN_MS.value,
+  minRise: SWING_MIN_RISE.value,
+});
 
 export function createPoseInput(sensing: FrameSource, options: PoseInputOptions): PoseInput {
   const detector = createSwingDetector(options.params ?? knobSwingParams);
