@@ -6,3 +6,4 @@ Webcam pose tracking is noisy, sees little depth, and arrives roughly 100–230 
 
 - Misses are made by moving the solver's target (long or wide), never by adding noise to the launch velocity, so they look like real misses, not glitches.
 - Adding spin or a phone-as-paddle later means feeding more fields into the same resolver, not adding collision.
+- Spin follows this rule: a Feed's Spin changes a Return only by moving its target (too much Lift against Topspin goes long, too little against Backspin lands short), never by changing the launch.
