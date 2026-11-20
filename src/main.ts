@@ -38,6 +38,7 @@ import {
 } from './game/constants.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { createFeeder } from './game/feeder.ts';
+import { makeRng, seedFromSearch } from './util/rng.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { createListeners } from './game/listeners.ts';
@@ -191,7 +192,12 @@ let ball: BallState = launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 },
 const simClock = createSimClock();
 const ballStatus = createBallStatusReadout();
 
-const feeder = createFeeder();
+/** Every random draw in the game comes from this one seeded source: `?seed=<n>` replays a session. */
+const seed = seedFromSearch(window.location.search);
+console.log(`[seed] ${seed} (reload with ?seed=${seed} to replay)`);
+const random = makeRng(seed);
+
+const feeder = createFeeder({ random });
 const sounds = createSounds();
 unlockAudioOnGesture(sounds);
 
@@ -215,7 +221,7 @@ const paddle = createPaddle({
   },
 });
 
-const resolver = createShotResolver({ params: knobResolverParams, hand: hittingHand });
+const resolver = createShotResolver({ params: knobResolverParams, hand: hittingHand, random });
 const score = createScore();
 
 /**

@@ -226,8 +226,8 @@ export interface ShotResolverOptions {
   params: () => ResolverParams;
   /** The player's hitting hand, read at each accepted Swing. */
   hand: () => Hand;
-  /** Uniform random numbers in [0, 1) for scatter; inject a fixed one in tests. */
-  random?: () => number;
+  /** Uniform random numbers in [0, 1) for scatter; build one with `makeRng(seed)`. */
+  random: () => number;
 }
 
 type FeedState =
@@ -239,7 +239,7 @@ type FeedState =
   | { readonly phase: 'done' };
 
 export function createShotResolver(options: ShotResolverOptions): ShotResolver {
-  const random = options.random ?? Math.random;
+  const random = options.random;
   let state: FeedState = { phase: 'none' };
 
   return {

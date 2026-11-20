@@ -330,7 +330,7 @@ describe('feedResult', () => {
 
 describe('a Feed that never reaches the player', () => {
   it('is a Miss at once, so the Streak still resets', () => {
-    const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right' });
+    const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right', random: noScatter });
     resolver.startFeed({ idealAtMs: null });
     const ball = makeFeed().ball;
     expect(resolver.update(16, ball, [])).toEqual([{ type: 'miss' }]);
@@ -340,7 +340,7 @@ describe('a Feed that never reaches the player', () => {
 
 describe('Swings with no Feed', () => {
   it('are ignored', () => {
-    const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right' });
+    const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right', random: noScatter });
     expect(resolver.swing({ t: 0, peakSpeed: 5, side: 'forehand', vertPath: 0 }, 0)).toEqual([]);
   });
 });

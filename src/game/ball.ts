@@ -30,11 +30,9 @@ import {
   TABLE_WIDTH,
 } from './constants.ts';
 
-export interface Vec3 {
-  x: number;
-  y: number;
-  z: number;
-}
+import type { Vec3 } from '../physics/vec3.ts';
+
+export type { Vec3 };
 
 /** Which half of the table, split by the net at z = 0. */
 export type TableHalf = 'player' | 'feeder';

@@ -156,8 +156,8 @@ export interface Feeder {
 }
 
 export interface FeederOptions {
-  /** Uniform random numbers in [0, 1); inject a seeded one in tests. */
-  random?: () => number;
+  /** Uniform random numbers in [0, 1); build one with `makeRng(seed)`. */
+  random: () => number;
 }
 
 /** Below this speed (m/s), on the table, a live ball has come to rest and the rally is over. */
@@ -165,8 +165,8 @@ const AT_REST_SPEED = 0.05;
 /** How close (m) the ball's bottom must be to the table top to count as resting on it. */
 const AT_REST_HEIGHT = 0.001;
 
-export function createFeeder(options: FeederOptions = {}): Feeder {
-  const random = options.random ?? Math.random;
+export function createFeeder(options: FeederOptions): Feeder {
+  const random = options.random;
   const feedListeners = new Set<(feed: Feed) => void>();
   const rallyEndListeners = new Set<(ball: BallState) => void>();
 
