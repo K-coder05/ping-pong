@@ -233,6 +233,14 @@ export const RETURN_SCATTER_M = knobs.number({ name: 'RETURN_SCATTER_M', min: 0,
 export const LIFT_FULL = knobs.number({ name: 'LIFT_FULL', min: 1, max: 10, step: 0.1, default: 4, group: 'Return' });
 /** Topspin of a Return with full Lift, revolutions/s. */
 export const RETURN_TOPSPIN_MAX_REVS = knobs.number({ name: 'RETURN_TOPSPIN_MAX_REVS', min: 0, max: 80, step: 1, default: 40, group: 'Return' });
+/**
+ * How far (metres) a Return's landing spot moves when the Swing's Lift doesn't answer a Feed's
+ * spin at full strength: shorter against Backspin with too little Lift, longer against Topspin
+ * with too much. Starting guess; tuned by feel.
+ */
+export const SPIN_ANSWER_M = knobs.number({ name: 'SPIN_ANSWER_M', min: 0, max: 1, step: 0.05, default: 0.3, group: 'Return' });
+/** Backspin never moves a Return's landing spot closer than this to the net, metres (fixed). */
+export const RETURN_MIN_DEPTH_M = 0.2;
 
 /** Developer mouse mode: shoulder width as a share of the canvas width (SPEC: the screen width). */
 export const MOUSE_SHOULDER_WIDTH = knobs.number({ name: 'MOUSE_SHOULDER_WIDTH', min: 0.1, max: 2, step: 0.05, default: 1, group: 'Swing' });

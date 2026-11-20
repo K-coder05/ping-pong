@@ -19,9 +19,12 @@ import {
   RETURN_FLIGHT_HARD_S,
   RETURN_FLIGHT_SOFT_S,
   RETURN_LONG_PUSH_M,
+  RETURN_MIN_DEPTH_M,
   RETURN_SAFE_FRACTION,
   RETURN_SCATTER_M,
   RETURN_TOPSPIN_MAX_REVS,
+  SPIN_ANSWER_M,
+  FEED_SPIN_MAX_REVS,
   SWING_FAST,
   SWING_MIN_RISE,
   SWING_ON,
@@ -68,6 +71,10 @@ export interface ResolverParams {
   liftFull: number;
   /** Topspin of a Return with Lift 1, revolutions/s. */
   returnTopspinMaxRevs: number;
+  /** `SPIN_ANSWER_M`: how far an unanswered Feed spin moves a Return's landing spot, metres. */
+  spinAnswerM: number;
+  /** `FEED_SPIN_MAX_REVS`: the Feed Topspin (rev/s) that counts as full spin when answering it. */
+  feedSpinMaxRevs: number;
 }
 
 /** What a Return is planned from: an accepted Swing, its timing and the player's hand. */
@@ -79,6 +86,8 @@ export interface ReturnInput {
   vertPath: number;
   side: SwingEvent['side'];
   hand: Hand;
+  /** Topspin of the Feed being returned, rad/s (negative = Backspin). */
+  feedTopspin: number;
 }
 
 /** Where and how fast a Return is aimed; the target solver turns it into a launch. */
@@ -131,7 +140,28 @@ export function planReturn(input: ReturnInput, params: ResolverParams, random: (
   const scatter = () => (2 * random() - 1) * params.scatterM * (1 - quality);
   const lift = liftOf(input.vertPath, params.minRise, params.liftFull);
   const topspin = lift * revsToRadPerSec(params.returnTopspinMaxRevs);
-  return { target: { x: x + scatter(), z: -depth + scatter() }, flightTime, quality, lift, topspin };
+  const targetX = x + scatter();
+  const finalDepth = answerSpin(depth - scatter(), input.feedTopspin, lift, params);
+  return { target: { x: targetX, z: -finalDepth }, flightTime, quality, lift, topspin };
+}
+
+/**
+ * Answer a Feed's spin by moving a Return's depth past the net (ADR 0001: only the target moves).
+ * With `s` the Feed's Topspin as a share of `feedSpinMaxRevs`, in [−1, 1]: against Backspin, depth
+ * shrinks by `spinAnswerM × max(0, −s − lift)`; against Topspin it grows by
+ * `spinAnswerM × max(0, lift − (1 − s))`. The shortening never takes the Return closer than
+ * `RETURN_MIN_DEPTH_M`, but never pushes out one that was already closer. `depth` is the final
+ * depth including scatter, so the minimum holds for the target the solver gets.
+ */
+function answerSpin(depth: number, feedTopspin: number, lift: number, params: ResolverParams): number {
+  const fullSpin = revsToRadPerSec(params.feedSpinMaxRevs);
+  const s = fullSpin > 0 && Number.isFinite(feedTopspin) ? Math.min(1, Math.max(-1, feedTopspin / fullSpin)) : 0;
+  if (s < 0) {
+    const shortened = depth - params.spinAnswerM * Math.max(0, -s - lift);
+    return Math.max(shortened, Math.min(depth, RETURN_MIN_DEPTH_M));
+  }
+  if (s > 0) return depth + params.spinAnswerM * Math.max(0, lift - (1 - s));
+  return depth;
 }
 
 function clamp01(value: number): number {
@@ -162,6 +192,8 @@ export function knobResolverParams(): ResolverParams {
     minRise: SWING_MIN_RISE.value,
     liftFull: LIFT_FULL.value,
     returnTopspinMaxRevs: RETURN_TOPSPIN_MAX_REVS.value,
+    spinAnswerM: SPIN_ANSWER_M.value,
+    feedSpinMaxRevs: FEED_SPIN_MAX_REVS.value,
   };
 }
 
@@ -239,6 +271,8 @@ export function feedResult(event: ShotEvent): 'returned' | 'failed' | null {
 export interface FeedTiming {
   /** The Feed's Ideal Time on the performance.now() clock; null if it never reaches the player. */
   readonly idealAtMs: number | null;
+  /** The Feed's Topspin, rad/s (negative = Backspin): the Swing's Lift must answer it. */
+  readonly topspin: number;
 }
 
 export interface ShotResolver {
@@ -267,7 +301,7 @@ export interface ShotResolverOptions {
 type FeedState =
   | { readonly phase: 'none' }
   /** Waiting for a Swing. `earlyDelta`: the last early Swing that kept the try, if any. */
-  | { readonly phase: 'open'; readonly idealAtMs: number | null; readonly earlyDelta: number | null }
+  | { readonly phase: 'open'; readonly idealAtMs: number | null; readonly topspin: number; readonly earlyDelta: number | null }
   | { readonly phase: 'accepted'; readonly accepted: Extract<ShotEvent, { type: 'accepted' }> }
   | { readonly phase: 'returning' }
   | { readonly phase: 'done' };
@@ -279,7 +313,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
 
   return {
     startFeed(feed) {
-      state = { phase: 'open', idealAtMs: feed.idealAtMs, earlyDelta: null };
+      state = { phase: 'open', idealAtMs: feed.idealAtMs, topspin: feed.topspin, earlyDelta: null };
     },
 
     swing(swing, nowMs) {
@@ -295,7 +329,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         state = { phase: 'done' };
         return [{ type: 'late', delta }];
       }
-      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand() }, params, random);
+      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand(), feedTopspin: state.topspin }, params, random);
       const accepted = { type: 'accepted', swing, delta, contactAtMs: Math.max(nowMs, state.idealAtMs), plan } as const;
       state = { phase: 'accepted', accepted };
       return [accepted];
