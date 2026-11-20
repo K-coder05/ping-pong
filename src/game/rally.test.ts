@@ -3,6 +3,7 @@ import { revsToRadPerSec } from '../physics/spin.ts';
 import { launchBall, simulate, type BallEvent, type BallState, type Vec3 } from './ball.ts';
 import { BALL_RADIUS, FEEDER_MOUTH, OPPONENT_END_Z, PLAYER_END_Z, TABLE_TOP_Y } from './constants.ts';
 import { createReferee, findIdealTime, lookAhead, type RallyEndCall } from './rally.ts';
+import { OPPONENT_SERVE_FROM, solveServe } from './serve.ts';
 import { otherSide, type Side } from './side.ts';
 import { solveShot, type ShotIntent } from './solver.ts';
 
@@ -204,3 +205,132 @@ function findNetCord(): BallState {
   }
   throw new Error('no Net-cord found');
 }
+
+// ---------------------------------------------------------------------------
+// Serves (spec P2-f1): the referee's Serve rules, from synthetic ball events.
+// Real Serve flights are in serve.test.ts (judgeServe).
+// ---------------------------------------------------------------------------
+
+const at = (half: Side) => ({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: half === 'player' ? 0.8 : -0.8 });
+const bounceOn = (half: Side): BallEvent => ({ type: 'bounce', half, position: at(half) });
+const NET: BallEvent = { type: 'net', position: { x: 0, y: 0.85, z: 0 } };
+const CORD: BallEvent = { type: 'cord', position: { x: 0, y: 0.95, z: 0 } };
+const OFF_TABLE: BallEvent = { type: 'out', reason: 'off-table', position: { x: 0, y: 0.7, z: 1.5 } };
+
+/** Referee a Serve by `server` through `events`: every call it made, its Serve result and Rally End. */
+function refereeServe(server: Side, events: readonly BallEvent[]) {
+  const ref = createReferee();
+  ref.serve(server);
+  const calls = events.map((event) => ref.ballEvent(event));
+  return { ref, calls, result: ref.serveResult, ended: ref.ended };
+}
+
+describe('referee: Serve rules', () => {
+  describe.each(BOTH)('a Serve by %s', (server) => {
+    const receiver = otherSide(server);
+    const fault = { end: 'fault', loser: server };
+
+    it('is legal once it bounces on the server half, then the receiver half; then the Rally plays on', () => {
+      const ref = createReferee();
+      ref.serve(server);
+      expect(ref.serveResult).toBeNull();
+      expect(ref.ballEvent(bounceOn(server))).toBeNull();
+      expect(ref.serveResult).toBeNull();
+      expect(ref.ballEvent(bounceOn(receiver))).toBeNull();
+      expect(ref.serveResult).toBe('legal');
+      // Then the receiver must return it, as after any Shot.
+      expect(ref.ballEvent(OFF_TABLE)).toBeNull();
+      expect(ref.noReturn()).toEqual({ end: 'unreturned', loser: receiver });
+    });
+
+    it('is legal and returned: the Return is judged as any Shot', () => {
+      const ref = createReferee();
+      ref.serve(server);
+      ref.ballEvent(bounceOn(server));
+      ref.ballEvent(bounceOn(receiver));
+      ref.shot(receiver);
+      expect(ref.ballEvent(bounceOn(receiver))).toEqual({ end: 'own-half', loser: receiver });
+      expect(ref.serveResult).toBe('legal');
+    });
+
+    it('is a Fault whose first bounce is on the receiver half', () => {
+      expect(refereeServe(server, [bounceOn(receiver)])).toMatchObject({ calls: [fault], result: 'fault', ended: fault });
+    });
+
+    it('is a Fault into the net, before or after its first bounce', () => {
+      expect(refereeServe(server, [NET]).calls).toEqual([fault]);
+      expect(refereeServe(server, [bounceOn(server), NET])).toMatchObject({ calls: [null, fault], result: 'fault' });
+    });
+
+    it('is a Fault off the table, before or after its first bounce', () => {
+      expect(refereeServe(server, [OFF_TABLE]).calls).toEqual([fault]);
+      expect(refereeServe(server, [bounceOn(server), OFF_TABLE]).calls).toEqual([null, fault]);
+    });
+
+    it('is a Fault that bounces twice on the server half', () => {
+      const doubleBounce: BallEvent = { type: 'out', reason: 'double-bounce', position: at(server) };
+      expect(refereeServe(server, [bounceOn(server), bounceOn(server), doubleBounce]).calls).toEqual([null, fault, null]);
+    });
+
+    it('is a Let that clips the net and then lands on the receiver half: no Point, and nothing more is judged', () => {
+      const { ref, calls, result, ended } = refereeServe(server, [bounceOn(server), CORD, bounceOn(receiver)]);
+      expect(calls).toEqual([null, null, null]);
+      expect(result).toBe('let');
+      expect(ended).toBeNull();
+      expect(ref.ballEvent(bounceOn(receiver))).toBeNull();
+      expect(ref.noReturn()).toBeNull();
+      expect(ref.ended).toBeNull();
+    });
+
+    it('is a Fault that clips the net and then dies or drops back', () => {
+      expect(refereeServe(server, [bounceOn(server), CORD, NET]).calls).toEqual([null, null, fault]);
+      expect(refereeServe(server, [bounceOn(server), CORD, bounceOn(server)]).result).toBe('fault');
+    });
+
+    it('lets the receiver\'s chance pass before the Serve lands without ending anything, then calls it once the ball is done', () => {
+      const ref = createReferee();
+      ref.serve(server);
+      expect(ref.noReturn()).toBeNull();
+      expect(ref.ballEvent(bounceOn(server))).toBeNull();
+      expect(ref.ballEvent(bounceOn(receiver))).toBeNull();
+      expect(ref.ballEvent(OFF_TABLE)).toEqual({ end: 'unreturned', loser: receiver });
+    });
+  });
+
+  it('has no Serve result in a Rally started with a Shot, and forgets it on reset()', () => {
+    const ref = createReferee();
+    ref.shot('opponent');
+    expect(ref.ballEvent(bounceOn('player'))).toBeNull();
+    expect(ref.serveResult).toBeNull();
+    ref.reset();
+    ref.serve('player');
+    ref.ballEvent(bounceOn('opponent'));
+    expect(ref.serveResult).toBe('fault');
+    ref.reset();
+    expect(ref.serveResult).toBeNull();
+    expect(ref.ended).toBeNull();
+  });
+});
+
+describe('lookAhead for a Serve', () => {
+  it('finds the Ideal Time after the bounce on the server half, then the receiver half; a Shot look-ahead finds none', () => {
+    // Bounces on the Opponent half, then carries on to the player half.
+    const solution = solveServe(OPPONENT_SERVE_FROM, { bounce1: { x: 0, z: -0.6 }, target: { x: 0, z: 0.9 }, flightTime: 0.2, topspin: 0, sidespin: 0 })!;
+    expect(solution).not.toBeNull();
+    const ball = launchBall(OPPONENT_SERVE_FROM, solution.velocity, solution.spin, 3);
+    const halves = eventsOf(ball).filter((e) => e.type === 'bounce').map((e) => (e.type === 'bounce' ? e.half : null));
+    expect(halves.slice(0, 2)).toEqual(['opponent', 'player']);
+    expect(lookAhead(ball, 'player')).toBeNull();
+    const ahead = lookAhead(ball, 'player', { serve: true })!;
+    expect(ahead).not.toBeNull();
+    expect(ahead.ideal.position.z).toBeCloseTo(PLAYER_END_Z, 6);
+    expect(ahead.strike.lastBounceHalf).toBe('player');
+    // Mirrored, from the player's end.
+    const mirrored = lookAhead(mirror(ball), 'opponent', { serve: true })!;
+    expect(Math.abs(mirrored.ideal.simSeconds - ahead.ideal.simSeconds)).toBeLessThan(0.001);
+  });
+
+  it('finds none for a Serve whose first bounce is on the receiver half', () => {
+    expect(lookAhead(solved({ x: 0, z: 0.8 }), 'player', { serve: true })).toBeNull();
+  });
+});

@@ -33,9 +33,12 @@ function scriptedPlayer(core: GameCore): (nowMs: number) => SwingEvent | null {
   };
 }
 
-/** `rallies` Rallies of the scripted player against the brain at `name`; the Shots in each (the Feed is Shot 0). */
+/** `rallies` Rallies of the scripted player against the brain at `name`; the Shots in each (the Serve is Shot 0). */
+/** A Match long enough never to end within these Rallies. */
+const ENDLESS_MATCH = { pointsToWin: 10_000, winBy: 2, bestOf: 1 };
+
 function playRallies(name: Difficulty, rallies: number, seed: number): { lengths: number[]; ends: Extract<RallyEvent, { type: 'end' }>[] } {
-  const core = createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: () => 'right', mode: 'match', opponent: createBrain(DIFFICULTIES[name]) });
+  const core = createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: () => 'right', mode: 'match', opponent: createBrain(DIFFICULTIES[name]), match: ENDLESS_MATCH });
   const nextSwing = scriptedPlayer(core);
   const lengths: number[] = [];
   const ends: Extract<RallyEvent, { type: 'end' }>[] = [];

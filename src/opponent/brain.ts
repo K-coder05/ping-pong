@@ -14,11 +14,17 @@
  * only returns the Shot's intent; the core strikes it at the Ideal Time with
  * `solveReturn`, which never moves an Error's target. Every draw comes from
  * the `random` it is given, in a fixed order, so a seed replays a Match.
+ *
+ * It also chooses each Serve (spec P2-f1): a target on the player's half,
+ * closer to the corners and with more Spin at higher Difficulty, checked to
+ * be legal, clear of the net and returnable before it is served. The
+ * Opponent never Faults.
  */
 
 import { launchBall, type Vec3 } from '../game/ball.ts';
 import { PLAYER_END_Z, TABLE_WIDTH } from '../game/constants.ts';
-import { findIdealTime, type Incoming, type Opponent } from '../game/rally.ts';
+import { findIdealTime, lookAhead, type Incoming, type Opponent } from '../game/rally.ts';
+import { OPPONENT_SERVE_FROM, solveServe, type ServeIntent } from '../game/serve.ts';
 import { contactPoint } from '../game/shotResolver.ts';
 import { solveShot, type ShotIntent, type ShotSolver, type SolveOptions, type TablePoint } from '../game/solver.ts';
 import { revsToRadPerSec } from '../physics/spin.ts';
@@ -62,6 +68,28 @@ const TOPSPIN_CHANCE = 0.75;
 const ERROR_MIN_M = 0.2;
 const ERROR_MAX_M = 0.4;
 
+/** A Serve's first bounce is drawn uniformly in z ∈ [SERVE_BOUNCE1_Z_MIN, SERVE_BOUNCE1_Z_MAX] on the Opponent's half, m. */
+export const SERVE_BOUNCE1_Z_MIN = -0.9;
+export const SERVE_BOUNCE1_Z_MAX = -0.3;
+/** A Serve's target: a deep corner (x = ±CORNER_X, z = CORNER_Z) with chance cornerAim, else uniform over x ∈ ±SERVE_HALF_WIDTH, z ∈ [SERVE_Z_MIN, SERVE_Z_MAX]. */
+const SERVE_HALF_WIDTH = 0.5;
+const SERVE_Z_MIN = 0.5;
+const SERVE_Z_MAX = 1.1;
+/** Chance a Serve carries Topspin; otherwise Backspin. */
+const SERVE_TOPSPIN_CHANCE = 0.5;
+/** The shooting method's first guess at a Serve's first-segment flight time, simulated s. */
+const SERVE_FIRST_FLIGHT_GUESS_S = 0.2;
+/** Serves drawn before falling back to SAFE_SERVE. About one draw in five can't be served (no solution, or it bounces twice before the player's end line). */
+const SERVE_MAX_DRAWS = 8;
+/** The Serve served when no drawn one can be: to the middle of the player's half, no Spin. */
+export const SAFE_SERVE: Readonly<ServeIntent> = Object.freeze({
+  bounce1: Object.freeze({ x: 0, z: -0.6 }),
+  target: Object.freeze({ x: 0, z: 0.9 }),
+  flightTime: SERVE_FIRST_FLIGHT_GUESS_S,
+  topspin: 0,
+  sidespin: 0,
+});
+
 /**
  * How hard an incoming ball is to return, 0..1, from the ball at its Ideal
  * Time: its speed against HARD_SPEED, its Spin against HARD_SPIN_REVS and its
@@ -96,11 +124,24 @@ export const solveToPlayer = ((from: Vec3, intent: ShotIntent, opts?: Partial<So
 /**
  * An Opponent playing at `params` (one row of DIFFICULTIES; it never changes
  * during a Match). `solve` (solveToPlayer unless a test stands one in)
- * decides whether a good Shot or Pop-up can be played.
+ * decides whether a good Shot or Pop-up can be played; `serve` (solveServe
+ * unless a test stands one in) whether a Serve can.
  */
-export function createBrain(params: DifficultyParams, solve: ShotSolver = solveToPlayer): Opponent {
+export function createBrain(params: DifficultyParams, solve: ShotSolver = solveToPlayer, serve: typeof solveServe = solveServe): Opponent {
   const p: Readonly<DifficultyParams> = Object.freeze({ ...params });
   return {
+    /**
+     * Draw Serves until one can be served (servable), at most
+     * SERVE_MAX_DRAWS; then SAFE_SERVE. The core solves the returned intent
+     * again with solveServe and gets the same launch the brain checked.
+     */
+    chooseServe(random) {
+      for (let draw = 0; draw < SERVE_MAX_DRAWS; draw++) {
+        const served = servable(serve, drawServe(p, random));
+        if (served) return served;
+      }
+      return servable(serve, SAFE_SERVE) ?? { ...SAFE_SERVE, bounce1: { ...SAFE_SERVE.bounce1 }, target: { ...SAFE_SERVE.target } };
+    },
     chooseShot(incoming, random) {
       const from = contactPoint(incoming.strike.position);
       if (random() < mistakeChance(p, incomingDifficulty(incoming))) {
@@ -111,6 +152,42 @@ export function createBrain(params: DifficultyParams, solve: ShotSolver = solveT
       return playable(solve, from, goodShot(p, incoming.strike.position.x, random));
     },
   };
+}
+
+/**
+ * A Serve: the target at a deep corner (chance cornerAim) or anywhere on the
+ * player's half, the first bounce on the line from OPPONENT_SERVE_FROM to it
+ * (the ball carries on in line), Topspin or Backspin up to maxSpinRevs.
+ */
+function drawServe(p: DifficultyParams, random: () => number): ServeIntent {
+  let target: TablePoint;
+  if (random() < p.cornerAim) {
+    target = { x: random() < 0.5 ? -CORNER_X : CORNER_X, z: CORNER_Z };
+  } else {
+    target = { x: (2 * random() - 1) * SERVE_HALF_WIDTH, z: SERVE_Z_MIN + random() * (SERVE_Z_MAX - SERVE_Z_MIN) };
+  }
+  const z = SERVE_BOUNCE1_Z_MIN + random() * (SERVE_BOUNCE1_Z_MAX - SERVE_BOUNCE1_Z_MIN);
+  const from = OPPONENT_SERVE_FROM;
+  const f = (z - from.z) / (target.z - from.z);
+  const bounce1 = { x: from.x + (target.x - from.x) * f, z };
+  const spinSign = random() < SERVE_TOPSPIN_CHANCE ? 1 : -1;
+  const topspin = spinSign * revsToRadPerSec(random() * p.maxSpinRevs);
+  return { bounce1, target, flightTime: SERVE_FIRST_FLIGHT_GUESS_S, topspin, sidespin: 0 };
+}
+
+/**
+ * The Serve with the first-segment flight time that solves it, if it can be
+ * served: solved (so legal and clear of the net), and solved again from that
+ * flight time (as the core will) to a launch that reaches the player's end
+ * line after its bounce there, so the player can return it. Null otherwise.
+ */
+function servable(serve: typeof solveServe, intent: ServeIntent): ServeIntent | null {
+  const first = serve(OPPONENT_SERVE_FROM, intent);
+  if (!first) return null;
+  const solved = { ...intent, bounce1: { ...intent.bounce1 }, target: { ...intent.target }, flightTime: first.flightTime };
+  const launch = serve(OPPONENT_SERVE_FROM, solved);
+  if (!launch) return null;
+  return lookAhead(launchBall(OPPONENT_SERVE_FROM, launch.velocity, launch.spin), 'player', { serve: true }) ? solved : null;
 }
 
 function popUp(): ShotIntent {
