@@ -1,5 +1,7 @@
 node_modules
 dist
+pose_csvs
+
 *.local
 .DS_Store
 .claude/worktrees
