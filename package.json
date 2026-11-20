@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "replay": "node scripts/replayLogs.ts",
-    "fit-player": "node scripts/fitPlayer.ts"
+    "fit-player": "node scripts/fitPlayer.ts",
+    "balance": "node scripts/balance.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.2.3",
