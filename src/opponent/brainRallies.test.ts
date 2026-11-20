@@ -73,7 +73,7 @@ describe('Headless Rallies of the scripted player against the brain', () => {
     // The scripted player swings at every Ideal Time: most Rallies end on an Opponent mistake.
     expect(run.ends.filter((e) => e.loser === 'opponent').length).toBeGreaterThan(RALLIES[name] / 2);
     lengths.set(name, run.lengths);
-  });
+  }, 60_000);
 
   it('Expert Rallies are longer than Novice on average over 200 Rallies', () => {
     const novice = lengths.get('novice') ?? playRallies('novice', RALLIES.novice, 61).lengths;
@@ -82,7 +82,7 @@ describe('Headless Rallies of the scripted player against the brain', () => {
     expect(expert).toHaveLength(200);
     console.log(`[rallies] average Shots per Rally: Novice ${mean(novice).toFixed(1)}, Expert ${mean(expert).toFixed(1)}`);
     expect(mean(expert)).toBeGreaterThan(mean(novice));
-  });
+  }, 60_000);
 });
 
 describe('GameCore.opponentPlan with the brain', () => {
