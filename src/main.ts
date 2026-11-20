@@ -35,7 +35,7 @@ import {
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './game/constants.ts';
-import { createGameCore, gameModeFromSearch } from './game/core.ts';
+import { createGameCore, describeMatchEvent, gameModeFromSearch } from './game/core.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
 import { createBrain } from './opponent/brain.ts';
@@ -257,6 +257,7 @@ core.onShot((event) => {
   }
 });
 core.onBounce(() => sounds.bounce());
+core.onMatch((e) => console.log(`[match] ${describeMatchEvent(e)}`));
 
 /** The play log: one entry per Shot coming to the player (fit with `npm run fit-player`). */
 const playLog = createPlayLogRecorder({ mode: core.mode });
@@ -338,7 +339,7 @@ function frame(now: number): void {
   core.setPaused(corePaused());
   hud.showHandLost((drilling() || calibrating) && handLost());
   core.frame({ nowMs: now, elapsedSeconds });
-  hud.showCountdown(core.feeder.countdown);
+  hud.showCountdown(core.countdown);
 
   debug.update(elapsedSeconds);
   ballStatus.update(core.ball, debug.active);
