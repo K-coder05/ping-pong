@@ -1,8 +1,9 @@
 /**
  * Ball physics: a point mass under gravity, air drag and the Magnus force of
- * its Spin (`physics/flight.ts`), stepped at a fixed PHYSICS_DT with a
- * hand-written table bounce (SPEC "Feeder and ball physics"). Spin fades in
- * flight; bounces and the net don't change it yet.
+ * its Spin (`physics/flight.ts`), stepped at a fixed PHYSICS_DT. A table
+ * bounce trades speed and Spin (`physics/bounce.ts`); a ball clipping the net
+ * top makes a Net-cord and carries on (`physics/net.ts`). Spin fades in
+ * flight; the floor and slow table contacts (settles) don't change it.
  *
  * Everything here is pure and headless: the game loop steps it in real time,
  * and the Feeder and target solver call `simulate` to look ahead.
@@ -16,7 +17,6 @@
 
 import {
   BALL_RADIUS,
-  BOUNCE_FRICTION,
   DRAG_K,
   FLOOR_FRICTION,
   FLOOR_RESTITUTION,
@@ -29,15 +29,21 @@ import {
   SETTLE_SPEED,
   SPIN_TAU_S,
   TABLE_HALF_LENGTH,
+  TABLE_KAPPA,
+  TABLE_MU,
   TABLE_RESTITUTION,
+  TABLE_SETTLE_FRICTION,
   TABLE_TOP_Y,
   TABLE_WIDTH,
 } from './constants.ts';
 
+import { tableBounce, type BounceParams } from '../physics/bounce.ts';
 import { decaySpin, flightAcceleration, type FlightParams } from '../physics/flight.ts';
+import { classifyNetCrossing, cordVelocity } from '../physics/net.ts';
 import { add, scale, ZERO, type Vec3 } from '../physics/vec3.ts';
+import { makeRng } from '../util/rng.ts';
 
-export type { FlightParams, Vec3 };
+export type { BounceParams, FlightParams, Vec3 };
 
 /** Which half of the table, split by the net at z = 0. */
 export type TableHalf = 'player' | 'feeder';
@@ -63,8 +69,14 @@ export type BallEvent =
    * not, so it drives the bounce sound; rules (Returns) must also check status.
    */
   | { readonly type: 'bounce'; readonly half: TableHalf; readonly position: Readonly<Vec3> }
-  /** A live ball crossed z = 0 with its bottom below the net top: it is now dead. */
+  /** A live ball crossed z = 0 with its bottom more than a radius below the net top: it is now dead. */
   | { readonly type: 'net'; readonly position: Readonly<Vec3> }
+  /**
+   * A Net-cord: the ball clipped the net top (its bottom within a radius below
+   * it) and carries on, popping up. Status doesn't change: one that then lands
+   * on the far half is a normal bounce there. Fires live or not, like `bounce`.
+   */
+  | { readonly type: 'cord'; readonly position: Readonly<Vec3> }
   /** A live ball ended the rally: below the table top outside its edges, or a second bounce on one half. */
   | { readonly type: 'out'; readonly reason: OutReason; readonly position: Readonly<Vec3> };
 
@@ -86,6 +98,11 @@ export function knobFlightParams(): FlightParams {
   return { g: GRAVITY, k: DRAG_K, kM: MAGNUS_K.value, spinTau: SPIN_TAU_S.value };
 }
 
+/** The table-bounce parameters from the live knobs; `stepBall` reads these at each bounce. */
+export function knobBounceParams(): BounceParams {
+  return { e: TABLE_RESTITUTION, mu: TABLE_MU.value, kappa: TABLE_KAPPA, r: BALL_RADIUS };
+}
+
 /** Ball centre height when its bottom touches the table top. */
 const TABLE_CONTACT_Y = TABLE_TOP_Y + BALL_RADIUS;
 const NET_TOP_Y = TABLE_TOP_Y + NET_HEIGHT;
@@ -94,7 +111,7 @@ const NET_TOP_Y = TABLE_TOP_Y + NET_HEIGHT;
 interface Crossing {
   /** Fraction of the remaining segment at which the crossing happens, 0..1. */
   fraction: number;
-  surface: 'table' | 'net' | 'floor';
+  surface: 'table' | 'net' | 'cord' | 'floor';
 }
 
 /** Advance one substep. Collisions are swept along the substep, so a fast ball can't skip through. */
@@ -106,6 +123,7 @@ export function stepBall(
   const events: BallEvent[] = [];
   let { status, lastBounceHalf } = state;
   const p = { ...state.position };
+  let spin: Vec3 = { ...state.spin };
 
   // Semi-implicit Euler: a = g − k|v|v + kM(ω × v), then v += a·dt, then p += v·dt.
   const v = add(state.velocity, scale(flightAcceleration(state.velocity, state.spin, params), dt));
@@ -113,9 +131,10 @@ export function stepBall(
   // Move along the substep, stopping at the earliest crossing, resolving it,
   // then carrying on with the new velocity for the time that is left.
   let remaining = dt;
+  let corded = false; // a Net-cord leaves the ball on the net plane: don't classify the net again this substep
   for (let guard = 0; guard < 4 && remaining > 0; guard++) {
     const next = { x: p.x + v.x * remaining, y: p.y + v.y * remaining, z: p.z + v.z * remaining };
-    const crossing = earliestCrossing(p, next);
+    const crossing = earliestCrossing(p, next, !corded);
     if (!crossing) {
       Object.assign(p, next);
       break;
@@ -128,7 +147,16 @@ export function stepBall(
       bounceOffSurface(v, FLOOR_RESTITUTION, FLOOR_FRICTION);
     } else if (crossing.surface === 'table') {
       p.y = TABLE_CONTACT_Y;
-      if (!bounceOffSurface(v, TABLE_RESTITUTION, BOUNCE_FRICTION.value)) continue;
+      if (-v.y < SETTLE_SPEED) {
+        // Too slow to bounce: settle on the table, so resting balls stop. Spin unchanged.
+        v.x *= TABLE_SETTLE_FRICTION;
+        v.z *= TABLE_SETTLE_FRICTION;
+        v.y = 0;
+        continue;
+      }
+      const out = tableBounce(v, spin, knobBounceParams());
+      Object.assign(v, out.velocity);
+      spin = out.spin;
       const half = halfAt(p.z);
       events.push({ type: 'bounce', half, position: { ...p } });
       if (status === 'live') {
@@ -138,6 +166,13 @@ export function stepBall(
         }
         lastBounceHalf = half;
       }
+    } else if (crossing.surface === 'cord') {
+      // Clipped the net top: sit the ball's bottom on it and carry on. The
+      // nudge comes from the Shot's own seed, so look-ahead cords identically.
+      corded = true;
+      p.y = NET_TOP_Y + BALL_RADIUS;
+      events.push({ type: 'cord', position: { ...p } });
+      Object.assign(v, cordVelocity(v, makeRng(state.seed)));
     } else {
       if (status === 'live') {
         status = 'dead';
@@ -154,16 +189,16 @@ export function stepBall(
     events.push({ type: 'out', reason: 'off-table', position: { ...p } });
   }
 
-  // Spin fades in flight; contacts don't change it in this model.
-  const spin = decaySpin(state.spin, dt, params.spinTau);
+  // Spin fades in flight (after any change at a table bounce this substep).
+  spin = decaySpin(spin, dt, params.spinTau);
 
   return { state: { position: p, velocity: v, spin, seed: state.seed, status, lastBounceHalf }, events };
 }
 
 /**
- * Bounce a ball moving down off a horizontal surface: restitution on the
- * vertical speed, friction on the horizontal. Returns false when the ball was
- * too slow to bounce and has settled on the surface instead.
+ * Bounce a ball moving down off the floor: restitution on the vertical speed,
+ * friction on the horizontal. Returns false when the ball was too slow to
+ * bounce and has settled on the floor instead.
  */
 function bounceOffSurface(v: Vec3, restitution: number, friction: number): boolean {
   v.x *= friction;
@@ -176,8 +211,11 @@ function bounceOffSurface(v: Vec3, restitution: number, friction: number): boole
   return true;
 }
 
-/** The first table, net or floor crossing on the segment from `a` to `b`, if any. */
-function earliestCrossing(a: Vec3, b: Vec3): Crossing | null {
+/**
+ * The first table, net (dead or Net-cord) or floor crossing on the segment
+ * from `a` to `b`, if any. With `withNet` false, the net is ignored.
+ */
+function earliestCrossing(a: Vec3, b: Vec3, withNet: boolean): Crossing | null {
   let best: Crossing | null = null;
 
   // Table: the ball's bottom passes down through the table top, over the table.
@@ -190,12 +228,16 @@ function earliestCrossing(a: Vec3, b: Vec3): Crossing | null {
 
   // Net: the ball's centre crosses z = 0 while any part of it is below the net
   // top (clearing the net means the ball's bottom clears it), anywhere along
-  // the net including its overhang past the side lines.
-  if ((a.z >= 0 && b.z < 0) || (a.z <= 0 && b.z > 0)) {
+  // the net including its overhang past the side lines. A bottom within one
+  // radius below the net top clips the top (a Net-cord); lower hits the net.
+  if (withNet && ((a.z >= 0 && b.z < 0) || (a.z <= 0 && b.z > 0))) {
     const fraction = a.z / (a.z - b.z);
     const at = lerp(a, b, fraction);
-    const overlapsNet = at.y - BALL_RADIUS < NET_TOP_Y && at.y + BALL_RADIUS > TABLE_TOP_Y && Math.abs(at.x) <= NET_LENGTH / 2;
-    if (overlapsNet && (!best || fraction < best.fraction)) best = { fraction, surface: 'net' };
+    const contact = classifyNetCrossing(at.y - BALL_RADIUS, NET_TOP_Y, BALL_RADIUS);
+    const alongNet = at.y + BALL_RADIUS > TABLE_TOP_Y && Math.abs(at.x) <= NET_LENGTH / 2;
+    if (contact !== 'clear' && alongNet && (!best || fraction < best.fraction)) {
+      best = { fraction, surface: contact === 'cord' ? 'cord' : 'net' };
+    }
   }
 
   return best;

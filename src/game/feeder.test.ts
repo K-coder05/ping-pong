@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { launchBall, stepBall, type BallEvent, type BallState } from './ball.ts';
-import { BALL_RADIUS, FEED_FLIGHT_TIME_S, FEEDER_MOUTH, HIT_WINDOW_MS, PHYSICS_DT, PLAYER_END_Z, TABLE_TOP_Y, TIME_SCALE, TIMING_OFFSET_MS } from './constants.ts';
+import { BALL_RADIUS, FEED_FLIGHT_TIME_S, FEED_TARGET_HALF_WIDTH, FEED_TARGET_Z_MAX, FEED_TARGET_Z_MIN, FEEDER_MOUTH, HIT_WINDOW_MS, PHYSICS_DT, PLAYER_END_Z, TABLE_TOP_Y, TIME_SCALE, TIMING_OFFSET_MS } from './constants.ts';
 import { createFeeder, findIdealTime, type Feed, type Feeder } from './feeder.ts';
 import { createSimClock } from './simClock.ts';
 import { solveLaunch } from './solver.ts';
 
 describe('Ideal Time', () => {
   it('is the moment the Feed crosses the player end of the table, after its bounce', () => {
-    const { velocity } = solveLaunch(FEEDER_MOUTH, { x: -0.3, z: 0.6 }, 1.0);
+    const { velocity } = solveLaunch(FEEDER_MOUTH, { x: -0.3, z: 0.7 }, 1.0);
     const feed = launchBall(FEEDER_MOUTH, velocity);
 
     const ideal = findIdealTime(feed);
@@ -35,6 +35,23 @@ describe('Ideal Time', () => {
     // A 1 s Feed reaches the end a few tenths of a second after it lands.
     expect(ideal!.simSeconds).toBeGreaterThan(1.0);
     expect(ideal!.simSeconds).toBeLessThan(1.8);
+  });
+
+  // Guards the target area against bounce changes (µ, the bounce model) that
+  // would make short or slow Feeds bounce twice on the player half.
+  it.each([
+    ['fastest', FEED_FLIGHT_TIME_S.min],
+    ['default', FEED_FLIGHT_TIME_S.default],
+    ['slowest', FEED_FLIGHT_TIME_S.max],
+  ])('exists for Feeds aimed anywhere on the edges of the target area, at the %s flight time', (_label, flightTime) => {
+    const xs = [-FEED_TARGET_HALF_WIDTH, 0, FEED_TARGET_HALF_WIDTH];
+    const zs = [FEED_TARGET_Z_MIN, (FEED_TARGET_Z_MIN + FEED_TARGET_Z_MAX) / 2, FEED_TARGET_Z_MAX];
+    for (const x of xs) {
+      for (const z of zs) {
+        const { velocity } = solveLaunch(FEEDER_MOUTH, { x, z }, flightTime);
+        expect(findIdealTime(launchBall(FEEDER_MOUTH, velocity)), `target (${x}, ${z})`).not.toBeNull();
+      }
+    }
   });
 
   it('is null for a ball that never reaches the player end after a bounce on the player half', () => {
