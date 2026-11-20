@@ -9,11 +9,13 @@ import {
   feedResult,
   judgeSwingTiming,
   knobResolverParams,
+  liftOf,
   planReturn,
   solveReturn,
   type ResolverParams,
   type ShotEvent,
 } from './shotResolver.ts';
+import { revsToRadPerSec, spinVector } from '../physics/spin.ts';
 import { solveShot, type ShotIntent, type ShotSolver, type SolveOptions } from './solver.ts';
 
 /** SPEC "Shot resolver and target solver" starting values. */
@@ -32,6 +34,9 @@ const SPEC: ResolverParams = {
   depthSoftM: 0.6,
   depthHardM: 1.2,
   scatterM: 0.1,
+  minRise: 0.5,
+  liftFull: 4,
+  returnTopspinMaxRevs: 40,
 };
 
 describe('knobResolverParams', () => {
@@ -80,14 +85,14 @@ const noScatter = () => 0.5;
 describe('Return direction from timing', () => {
   // World x: + is the player's right (screen right from the play camera).
   it("sends a right-hander's early Forehand cross-court (to their left) and a late one down the line", () => {
-    const swing = { peakSpeed: 3, side: 'forehand', hand: 'right' } as const;
+    const swing = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right' } as const;
     expect(planReturn({ ...swing, delta: -100 }, SPEC, noScatter).target.x).toBeCloseTo(-0.3);
     expect(planReturn({ ...swing, delta: 100 }, SPEC, noScatter).target.x).toBeCloseTo(0.3);
     expect(planReturn({ ...swing, delta: 0 }, SPEC, noScatter).target.x).toBeCloseTo(0);
   });
 
   it('flips the direction for a Backhand and for a left-hander', () => {
-    const early = { peakSpeed: 3, delta: -100 } as const;
+    const early = { peakSpeed: 3, vertPath: 0, delta: -100 } as const;
     expect(planReturn({ ...early, side: 'backhand', hand: 'right' }, SPEC, noScatter).target.x).toBeCloseTo(0.3);
     expect(planReturn({ ...early, side: 'forehand', hand: 'left' }, SPEC, noScatter).target.x).toBeCloseTo(0.3);
     expect(planReturn({ ...early, side: 'backhand', hand: 'left' }, SPEC, noScatter).target.x).toBeCloseTo(-0.3);
@@ -95,7 +100,7 @@ describe('Return direction from timing', () => {
 });
 
 describe('Return pace and depth from peak speed', () => {
-  const onTime = { delta: 0, side: 'forehand', hand: 'right' } as const;
+  const onTime = { delta: 0, vertPath: 0, side: 'forehand', hand: 'right' } as const;
   const plan = (peakSpeed: number) => planReturn({ ...onTime, peakSpeed }, SPEC, noScatter);
 
   it('sends a soft Swing slow and short, and a full-power one fast and deep', () => {
@@ -113,7 +118,7 @@ describe('Return pace and depth from peak speed', () => {
 });
 
 describe('Return risk from timing quality', () => {
-  const soft = { peakSpeed: 3, side: 'forehand', hand: 'right' } as const;
+  const soft = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right' } as const;
   const depthAt = (delta: number) => planReturn({ ...soft, delta }, SPEC, noScatter).target.z;
 
   it('keeps Swings in the inner 70% of the Hit Window at their safe depth', () => {
@@ -133,7 +138,7 @@ describe('Return risk from timing quality', () => {
 });
 
 describe('Return scatter', () => {
-  const soft = { peakSpeed: 3, side: 'forehand', hand: 'right' } as const;
+  const soft = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right' } as const;
 
   it('never scatters a perfectly timed Swing', () => {
     const plan = planReturn({ ...soft, delta: 0 }, SPEC, () => 0);
@@ -415,6 +420,90 @@ describe('solveReturn', () => {
     expect(calls.map((c) => c.opts?.bestEffort ?? false)).toEqual([false, false, true]);
     for (const { intent } of calls) expect(intent.target).toEqual(spun.target);
     expect(calls[2]!.intent).toMatchObject({ topspin: 0, sidespin: 0 });
+  });
+});
+
+describe('liftOf', () => {
+  it('is 0 at the minimum Swing rise, 1 at full Lift and above, and linear between', () => {
+    expect(liftOf(0.5, 0.5, 4)).toBe(0);
+    expect(liftOf(4, 0.5, 4)).toBe(1);
+    expect(liftOf(9, 0.5, 4)).toBe(1);
+    expect(liftOf(2.25, 0.5, 4)).toBeCloseTo(0.5);
+  });
+
+  it('is 0 for a flat or falling (mouse) Swing, and for a Swing with no usable speed', () => {
+    expect(liftOf(0, 0.5, 4)).toBe(0);
+    expect(liftOf(-3, 0.5, 4)).toBe(0);
+    expect(liftOf(NaN, 0.5, 4)).toBe(0);
+  });
+
+  it('is a step at the minimum rise when LIFT_FULL does not exceed it', () => {
+    expect(liftOf(0.5, 1, 1)).toBe(0);
+    expect(liftOf(1, 1, 1)).toBe(0);
+    expect(liftOf(1.01, 1, 1)).toBe(1);
+    expect(liftOf(-1, 3, 2)).toBe(0);
+    expect(liftOf(3.5, 3, 2)).toBe(1);
+  });
+});
+
+describe('Lift puts Topspin on Returns', () => {
+  const swingWith = (vertPath: number) => ({ delta: 0, peakSpeed: 5, vertPath, side: 'forehand', hand: 'right' }) as const;
+
+  it('plans Topspin = Lift × RETURN_TOPSPIN_MAX_REVS, in rad/s', () => {
+    expect(planReturn(swingWith(0), SPEC, noScatter)).toMatchObject({ lift: 0, topspin: 0 });
+    expect(planReturn(swingWith(2.25), SPEC, noScatter).topspin).toBeCloseTo(0.5 * revsToRadPerSec(40));
+    expect(planReturn(swingWith(6), SPEC, noScatter)).toMatchObject({ lift: 1, topspin: revsToRadPerSec(40) });
+  });
+
+  it('does not change where the Return is aimed or how fast', () => {
+    const flat = planReturn(swingWith(0), SPEC, noScatter);
+    const lifted = planReturn(swingWith(6), SPEC, noScatter);
+    expect(lifted.target).toEqual(flat.target);
+    expect(lifted.flightTime).toBe(flat.flightTime);
+  });
+
+  it.each([0.3, 0.6, 1])('launches with that Topspin and lands within 2 cm of its target (Lift %s)', (lift) => {
+    const { idealAtMs } = makeFeed();
+    const vertPath = 0.5 + lift * (4 - 0.5);
+    const played = playFeed({ swingsAtMs: [idealAtMs - 100], swing: { peakSpeed: 5, vertPath } });
+    const contact = played.events.find((e) => e.type === 'contact') as Extract<ShotEvent, { type: 'contact' }>;
+    expect(contact.plan.lift).toBeCloseTo(lift);
+
+    const { target } = contact.plan;
+    const dx = target.x - contact.position.x;
+    const dz = target.z - contact.position.z;
+    const d = { x: dx / Math.hypot(dx, dz), y: 0, z: dz / Math.hypot(dx, dz) };
+    const expected = spinVector(lift * revsToRadPerSec(40), 0, d);
+    expect(contact.ball.spin.x).toBeCloseTo(expected.x, 6);
+    expect(contact.ball.spin.y).toBeCloseTo(0, 6);
+    expect(contact.ball.spin.z).toBeCloseTo(expected.z, 6);
+
+    const landing = firstLanding(contact.ball);
+    expect(landing.bounced).toBe(true);
+    expect(Math.hypot(landing.position.x - target.x, landing.position.z - target.z)).toBeLessThan(0.02);
+  });
+
+  it('gives exactly the same Return as before at zero Lift: no spin, same launch as a zero-spin solve', () => {
+    const { idealAtMs } = makeFeed();
+    const played = playFeed({ swingsAtMs: [idealAtMs - 100], swing: { vertPath: 0 } });
+    const contact = played.events.find((e) => e.type === 'contact') as Extract<ShotEvent, { type: 'contact' }>;
+    expect(contact.ball.spin).toEqual({ x: 0, y: 0, z: 0 });
+    const baseline = solveShot(contact.position, { target: contact.plan.target, flightTime: contact.plan.flightTime, topspin: 0, sidespin: 0 })!;
+    expect(contact.ball.velocity).toEqual(baseline.velocity);
+  });
+
+  it('falls back to the same target with no spin, then best effort, when a spun Return cannot be solved', () => {
+    const { solve, calls } = failingSolver(() => true);
+    const { idealAtMs } = makeFeed();
+    const played = playFeed({ swingsAtMs: [idealAtMs - 100], swing: { peakSpeed: 5, vertPath: 6 }, solve });
+    const contact = played.events.find((e) => e.type === 'contact') as Extract<ShotEvent, { type: 'contact' }>;
+    expect(calls.map((c) => [c.intent.topspin !== 0, c.opts?.bestEffort ?? false])).toEqual([
+      [true, false],
+      [false, false],
+      [false, true],
+    ]);
+    for (const { intent } of calls) expect(intent.target).toEqual(contact.plan.target);
+    expect(contact.ball.spin).toEqual({ x: 0, y: 0, z: 0 });
   });
 });
 

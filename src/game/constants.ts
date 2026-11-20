@@ -229,6 +229,10 @@ export const RETURN_DEPTH_SOFT_M = knobs.number({ name: 'RETURN_DEPTH_SOFT_M', m
 export const RETURN_DEPTH_HARD_M = knobs.number({ name: 'RETURN_DEPTH_HARD_M', min: 0.2, max: 1.3, step: 0.05, default: 1.2, group: 'Return' });
 /** Most random scatter of a Return's landing spot on x and z (scaled by 1 − timing quality), metres. */
 export const RETURN_SCATTER_M = knobs.number({ name: 'RETURN_SCATTER_M', min: 0, max: 0.3, step: 0.01, default: 0.1, group: 'Return' });
+/** Vertical wrist speed at Swing Onset that gives a Return full Lift (Lift 1), shoulder widths/s; Lift is 0 at SWING_MIN_RISE. */
+export const LIFT_FULL = knobs.number({ name: 'LIFT_FULL', min: 1, max: 10, step: 0.1, default: 4, group: 'Return' });
+/** Topspin of a Return with full Lift, revolutions/s. */
+export const RETURN_TOPSPIN_MAX_REVS = knobs.number({ name: 'RETURN_TOPSPIN_MAX_REVS', min: 0, max: 80, step: 1, default: 40, group: 'Return' });
 
 /** Developer mouse mode: shoulder width as a share of the canvas width (SPEC: the screen width). */
 export const MOUSE_SHOULDER_WIDTH = knobs.number({ name: 'MOUSE_SHOULDER_WIDTH', min: 0.1, max: 2, step: 0.05, default: 1, group: 'Swing' });

@@ -13,6 +13,7 @@ import {
   EARLY_SWING_USES_TRY,
   HIT_WINDOW_MS,
   LATE_GRACE_MS,
+  LIFT_FULL,
   RETURN_DEPTH_HARD_M,
   RETURN_DEPTH_SOFT_M,
   RETURN_FLIGHT_HARD_S,
@@ -20,11 +21,14 @@ import {
   RETURN_LONG_PUSH_M,
   RETURN_SAFE_FRACTION,
   RETURN_SCATTER_M,
+  RETURN_TOPSPIN_MAX_REVS,
   SWING_FAST,
+  SWING_MIN_RISE,
   SWING_ON,
   TABLE_TOP_Y,
   TIMING_OFFSET_MS,
 } from './constants.ts';
+import { revsToRadPerSec } from '../physics/spin.ts';
 import { judgeReturnFlight, type ReturnFlightResult } from './score.ts';
 import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type TablePoint } from './solver.ts';
 
@@ -58,6 +62,12 @@ export interface ResolverParams {
   depthHardM: number;
   /** Most random scatter on x and z (scaled by 1 − timing quality), metres. */
   scatterM: number;
+  /** `SWING_MIN_RISE`: vertical wrist speed where Lift is 0, shoulder widths/s. */
+  minRise: number;
+  /** `LIFT_FULL`: vertical wrist speed where Lift is 1, shoulder widths/s. */
+  liftFull: number;
+  /** Topspin of a Return with Lift 1, revolutions/s. */
+  returnTopspinMaxRevs: number;
 }
 
 /** What a Return is planned from: an accepted Swing, its timing and the player's hand. */
@@ -65,6 +75,8 @@ export interface ReturnInput {
   /** Corrected Swing Onset minus Ideal Time, ms (negative = early); within the Hit Window. */
   delta: number;
   peakSpeed: number;
+  /** The Swing's `vertPath`: vertical wrist speed at Onset, shoulder widths/s, + up. */
+  vertPath: number;
   side: SwingEvent['side'];
   hand: Hand;
 }
@@ -77,6 +89,21 @@ export interface ReturnPlan {
   flightTime: number;
   /** Timing quality q = 1 − |delta| / W: 1 at the Ideal Time, 0 at the edge of the window. */
   quality: number;
+  /** The Swing's Lift, 0 (flat) to 1 (full). */
+  lift: number;
+  /** Topspin of the Return, rad/s: Lift × the Return-Topspin knob. Returns never carry Backspin or Sidespin. */
+  topspin: number;
+}
+
+/**
+ * Lift of a Swing, 0 to 1: 0 at `minRise`, 1 at `liftFull` and above, linear between. A falling
+ * Swing (mouse input) is 0. If the knobs overlap (`liftFull` ≤ `minRise`) Lift is a step: 0 up to
+ * `minRise`, 1 above it.
+ */
+export function liftOf(vertPath: number, minRise: number, liftFull: number): number {
+  if (!Number.isFinite(vertPath)) return 0;
+  if (liftFull <= minRise) return vertPath > minRise ? 1 : 0;
+  return clamp01((vertPath - minRise) / (liftFull - minRise));
 }
 
 /**
@@ -102,7 +129,9 @@ export function planReturn(input: ReturnInput, params: ResolverParams, random: (
   // Natural variation, none for a perfectly timed Swing. It moves the target,
   // never the launch velocity (ADR 0001).
   const scatter = () => (2 * random() - 1) * params.scatterM * (1 - quality);
-  return { target: { x: x + scatter(), z: -depth + scatter() }, flightTime, quality };
+  const lift = liftOf(input.vertPath, params.minRise, params.liftFull);
+  const topspin = lift * revsToRadPerSec(params.returnTopspinMaxRevs);
+  return { target: { x: x + scatter(), z: -depth + scatter() }, flightTime, quality, lift, topspin };
 }
 
 function clamp01(value: number): number {
@@ -130,6 +159,9 @@ export function knobResolverParams(): ResolverParams {
     depthSoftM: RETURN_DEPTH_SOFT_M.value,
     depthHardM: RETURN_DEPTH_HARD_M.value,
     scatterM: RETURN_SCATTER_M.value,
+    minRise: SWING_MIN_RISE.value,
+    liftFull: LIFT_FULL.value,
+    returnTopspinMaxRevs: RETURN_TOPSPIN_MAX_REVS.value,
   };
 }
 
@@ -263,7 +295,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         state = { phase: 'done' };
         return [{ type: 'late', delta }];
       }
-      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, side: swing.side, hand: options.hand() }, params, random);
+      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand() }, params, random);
       const accepted = { type: 'accepted', swing, delta, contactAtMs: Math.max(nowMs, state.idealAtMs), plan } as const;
       state = { phase: 'accepted', accepted };
       return [accepted];
@@ -281,7 +313,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
       if (state.phase === 'accepted' && nowMs >= state.accepted.contactAtMs) {
         const { swing, delta, plan } = state.accepted;
         const position = contactPoint(ball.position);
-        const solution = solveReturn(solve, position, { target: plan.target, flightTime: plan.flightTime, topspin: 0, sidespin: 0 });
+        const solution = solveReturn(solve, position, { target: plan.target, flightTime: plan.flightTime, topspin: plan.topspin, sidespin: 0 });
         const seed = Math.floor(random() * 2 ** 32);
         const struck = launchBall(position, solution.velocity, solution.spin, seed);
         events.push({ type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: struck });
@@ -306,7 +338,8 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
  * Solve a Return for its planned target, which never moves because the solver
  * failed (ADR 0001): a planned miss, long or wide, stays a miss. If the
  * intent can't be solved, it is tried again with no spin (when it had any),
- * then solved best-effort with no spin, and that launch is used.
+ * then solved best-effort with no spin, and that launch is used. A Return
+ * with Topspin takes this path whenever its spun Shot has no solution.
  */
 export function solveReturn(solve: ShotSolver, from: Vec3, intent: ShotIntent): ShotSolution {
   const solved = solve(from, intent);
