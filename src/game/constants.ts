@@ -240,6 +240,12 @@ export const RETURN_TOPSPIN_MAX_REVS = knobs.number({ name: 'RETURN_TOPSPIN_MAX_
  * with too much. Starting guess; tuned by feel.
  */
 export const SPIN_ANSWER_M = knobs.number({ name: 'SPIN_ANSWER_M', min: 0, max: 1, step: 0.05, default: 0.3, group: 'Return' });
+/**
+ * The incoming Topspin or Backspin (rev/s) that counts as full spin when the player answers it
+ * with Lift, for any incoming Shot (a Feed or an Opponent's); more counts as full. Fixed, not a
+ * knob: 40, the default FEED_SPIN_MAX_REVS, so Return Drill is unchanged at default knobs.
+ */
+export const SPIN_ANSWER_FULL_REVS = 40;
 /** Backspin never moves a Return's landing spot closer than this to the net, metres (fixed). */
 export const RETURN_MIN_DEPTH_M = 0.2;
 

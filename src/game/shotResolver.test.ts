@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { SwingEvent } from '../input/types.ts';
 import type { Hand } from '../sensing/landmarks.ts';
 import { launchBall, simulate, stepBall, type BallEvent, type BallState, type Vec3 } from './ball.ts';
-import { BALL_RADIUS, OPPONENT_END_Z, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
-import { findIdealTime } from './feeder.ts';
+import { BALL_RADIUS, OPPONENT_END_Z, FEED_SPIN_MAX_REVS, FEEDER_MOUTH, PLAYER_END_Z, SPIN_ANSWER_FULL_REVS, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
+import { findIdealTime } from './rally.ts';
 import {
   createShotResolver,
   feedResult,
@@ -38,7 +38,7 @@ const SPEC: ResolverParams = {
   liftFull: 4,
   returnTopspinMaxRevs: 40,
   spinAnswerM: 0.3,
-  feedSpinMaxRevs: 40,
+  spinAnswerFullRevs: 40,
 };
 
 describe('knobResolverParams', () => {
@@ -50,7 +50,7 @@ describe('knobResolverParams', () => {
     const idealAtMs = 10_000;
     const judge = (seenAtMs: number) => {
       const resolver = createShotResolver({ params: knobResolverParams, hand: () => 'right', random: noScatter });
-      resolver.startFeed({ idealAtMs, topspin: 0 });
+      resolver.startIncoming({ idealAtMs, topspin: 0 });
       return resolver.swing({ t: seenAtMs, peakSpeed: 3, side: 'forehand', vertPath: 0 }, seenAtMs)[0]?.type;
     };
     try {
@@ -87,14 +87,14 @@ const noScatter = () => 0.5;
 describe('Return direction from timing', () => {
   // World x: + is the player's right (screen right from the play camera).
   it("sends a right-hander's early Forehand cross-court (to their left) and a late one down the line", () => {
-    const swing = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right', feedTopspin: 0 } as const;
+    const swing = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right', incomingTopspin: 0 } as const;
     expect(planReturn({ ...swing, delta: -100 }, SPEC, noScatter).target.x).toBeCloseTo(-0.3);
     expect(planReturn({ ...swing, delta: 100 }, SPEC, noScatter).target.x).toBeCloseTo(0.3);
     expect(planReturn({ ...swing, delta: 0 }, SPEC, noScatter).target.x).toBeCloseTo(0);
   });
 
   it('flips the direction for a Backhand and for a left-hander', () => {
-    const early = { peakSpeed: 3, vertPath: 0, delta: -100, feedTopspin: 0 } as const;
+    const early = { peakSpeed: 3, vertPath: 0, delta: -100, incomingTopspin: 0 } as const;
     expect(planReturn({ ...early, side: 'backhand', hand: 'right' }, SPEC, noScatter).target.x).toBeCloseTo(0.3);
     expect(planReturn({ ...early, side: 'forehand', hand: 'left' }, SPEC, noScatter).target.x).toBeCloseTo(0.3);
     expect(planReturn({ ...early, side: 'backhand', hand: 'left' }, SPEC, noScatter).target.x).toBeCloseTo(-0.3);
@@ -102,7 +102,7 @@ describe('Return direction from timing', () => {
 });
 
 describe('Return pace and depth from peak speed', () => {
-  const onTime = { delta: 0, vertPath: 0, side: 'forehand', hand: 'right', feedTopspin: 0 } as const;
+  const onTime = { delta: 0, vertPath: 0, side: 'forehand', hand: 'right', incomingTopspin: 0 } as const;
   const plan = (peakSpeed: number) => planReturn({ ...onTime, peakSpeed }, SPEC, noScatter);
 
   it('sends a soft Swing slow and short, and a full-power one fast and deep', () => {
@@ -120,7 +120,7 @@ describe('Return pace and depth from peak speed', () => {
 });
 
 describe('Return risk from timing quality', () => {
-  const soft = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right', feedTopspin: 0 } as const;
+  const soft = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right', incomingTopspin: 0 } as const;
   const depthAt = (delta: number) => planReturn({ ...soft, delta }, SPEC, noScatter).target.z;
 
   it('keeps Swings in the inner 70% of the Hit Window at their safe depth', () => {
@@ -140,7 +140,7 @@ describe('Return risk from timing quality', () => {
 });
 
 describe('Return scatter', () => {
-  const soft = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right', feedTopspin: 0 } as const;
+  const soft = { peakSpeed: 3, vertPath: 0, side: 'forehand', hand: 'right', incomingTopspin: 0 } as const;
 
   it('never scatters a perfectly timed Swing', () => {
     const plan = planReturn({ ...soft, delta: 0 }, SPEC, () => 0);
@@ -170,7 +170,7 @@ const SUBSTEPS_PER_FRAME = 4; // 4 × 1/240 s
 function makeFeed(target = { x: 0.2, z: 0.7 }, topspin = 0) {
   const { velocity } = solveShot(FEEDER_MOUTH, { target, flightTime: 1.0, topspin: 0, sidespin: 0 })!;
   const ball = launchBall(FEEDER_MOUTH, velocity);
-  const ideal = findIdealTime(ball)!;
+  const ideal = findIdealTime(ball, 'player')!;
   return { ball, idealAtMs: ideal.simSeconds * 1000, topspin };
 }
 
@@ -194,17 +194,17 @@ function playFeed(options: {
   untilMs?: number;
   feedTarget?: { x: number; z: number };
   /** The Feed's Topspin as the resolver is told it, rad/s. */
-  feedTopspin?: number;
+  incomingTopspin?: number;
   solve?: ShotSolver;
 }): PlayedFeed {
-  const feed = makeFeed(options.feedTarget, options.feedTopspin ?? 0);
+  const feed = makeFeed(options.feedTarget, options.incomingTopspin ?? 0);
   const resolver = createShotResolver({
     params: () => ({ ...SPEC, ...options.params }),
     hand: () => options.hand ?? 'right',
     random: noScatter,
     solve: options.solve,
   });
-  resolver.startFeed({ idealAtMs: feed.idealAtMs, topspin: feed.topspin });
+  resolver.startIncoming({ idealAtMs: feed.idealAtMs, topspin: feed.topspin });
   let ball: BallState = feed.ball;
   const pending = [...(options.swingsAtMs ?? [])];
   const timeline: PlayedFeed['timeline'] = [];
@@ -451,7 +451,7 @@ describe('liftOf', () => {
 });
 
 describe('Lift puts Topspin on Returns', () => {
-  const swingWith = (vertPath: number) => ({ delta: 0, peakSpeed: 5, vertPath, side: 'forehand', hand: 'right', feedTopspin: 0 }) as const;
+  const swingWith = (vertPath: number) => ({ delta: 0, peakSpeed: 5, vertPath, side: 'forehand', hand: 'right', incomingTopspin: 0 }) as const;
 
   it('plans Topspin = Lift × RETURN_TOPSPIN_MAX_REVS, in rad/s', () => {
     expect(planReturn(swingWith(0), SPEC, noScatter)).toMatchObject({ lift: 0, topspin: 0 });
@@ -512,13 +512,13 @@ describe('Lift puts Topspin on Returns', () => {
 });
 
 describe("Answering a Feed's spin", () => {
-  const FULL = revsToRadPerSec(40); // FEED_SPIN_MAX_REVS
+  const FULL = revsToRadPerSec(40); // SPIN_ANSWER_FULL_REVS
   const SHIFT = 0.3; // SPIN_ANSWER_M
   // Lift = (vertPath − 0.5) / 3.5, so these vertPaths give Lift 0, 0.2 and 1.
   const VERT = { 0: 0.5, 0.2: 1.2, 1: 4 } as const;
   /** A Swing of power 0.5 (peak 5.5), so depth is 0.9 m before spin and scatter. */
-  const planFor = (feedTopspin: number, lift: keyof typeof VERT, params: Partial<ResolverParams> = {}, random = noScatter) =>
-    planReturn({ delta: 0, peakSpeed: 5.5, vertPath: VERT[lift], side: 'forehand', hand: 'right', feedTopspin }, { ...SPEC, ...params }, random);
+  const planFor = (incomingTopspin: number, lift: keyof typeof VERT, params: Partial<ResolverParams> = {}, random = noScatter) =>
+    planReturn({ delta: 0, peakSpeed: 5.5, vertPath: VERT[lift], side: 'forehand', hand: 'right', incomingTopspin }, { ...SPEC, ...params }, random);
   const depthOf = (plan: ReturnType<typeof planFor>) => -plan.target.z;
   const BASE = 0.9;
 
@@ -551,10 +551,10 @@ describe("Answering a Feed's spin", () => {
   });
 
   it('applies the clamp to the final target, scatter included', () => {
-    const edge = { delta: 100, peakSpeed: 3, vertPath: 0.5, side: 'forehand', hand: 'right', feedTopspin: -FULL } as const;
+    const edge = { delta: 100, peakSpeed: 3, vertPath: 0.5, side: 'forehand', hand: 'right', incomingTopspin: -FULL } as const;
     const params = { ...SPEC, depthSoftM: 0.4, scatterM: 0.3 };
     // delta 100 of W 200: quality 0.5, scatter amplitude 0.15. random 1 scatters z 0.15 m shallower: depth 0.25 unspun.
-    const unspun = planReturn({ ...edge, feedTopspin: 0 }, params, () => 1);
+    const unspun = planReturn({ ...edge, incomingTopspin: 0 }, params, () => 1);
     expect(-unspun.target.z).toBeCloseTo(0.25);
     expect(-planReturn(edge, params, () => 1).target.z).toBeCloseTo(0.2);
   });
@@ -577,15 +577,26 @@ describe("Answering a Feed's spin", () => {
     expect(depthOf(planFor(0.5 * FULL, 0.2))).toBeCloseTo(BASE);
   });
 
-  it('clamps Feed spin beyond FEED_SPIN_MAX_REVS to full, and treats a zero maximum as no spin', () => {
+  it('answers any incoming Shot against the fixed SPIN_ANSWER_FULL_REVS, whatever the Feeder\'s FEED_SPIN_MAX_REVS knob', () => {
+    expect(SPIN_ANSWER_FULL_REVS).toBe(40);
+    try {
+      FEED_SPIN_MAX_REVS.set(80);
+      expect(knobResolverParams().spinAnswerFullRevs).toBe(SPIN_ANSWER_FULL_REVS);
+      expect(depthOf(planFor(-FULL, 0, { spinAnswerFullRevs: knobResolverParams().spinAnswerFullRevs }))).toBeCloseTo(BASE - SHIFT);
+    } finally {
+      FEED_SPIN_MAX_REVS.reset();
+    }
+  });
+
+  it('clamps incoming spin beyond SPIN_ANSWER_FULL_REVS to full, and treats a zero maximum as no spin', () => {
     expect(depthOf(planFor(-3 * FULL, 0))).toBeCloseTo(BASE - SHIFT);
-    expect(depthOf(planFor(-FULL, 0, { feedSpinMaxRevs: 0 }))).toBeCloseTo(BASE);
+    expect(depthOf(planFor(-FULL, 0, { spinAnswerFullRevs: 0 }))).toBeCloseTo(BASE);
   });
 
   it('adds to the existing depth: timing risk and scatter stay', () => {
     const edge = { delta: 190, peakSpeed: 5.5, vertPath: 0.5, side: 'forehand', hand: 'right' } as const;
-    const plain = planReturn({ ...edge, feedTopspin: 0 }, SPEC, () => 0.75);
-    const backspin = planReturn({ ...edge, feedTopspin: -FULL }, SPEC, () => 0.75);
+    const plain = planReturn({ ...edge, incomingTopspin: 0 }, SPEC, () => 0.75);
+    const backspin = planReturn({ ...edge, incomingTopspin: -FULL }, SPEC, () => 0.75);
     expect(-backspin.target.z).toBeCloseTo(-plain.target.z - SHIFT);
     expect(backspin.target.x).toBe(plain.target.x);
   });
@@ -599,8 +610,8 @@ describe("Answering a Feed's spin", () => {
 
   it('makes a flat Swing against Backspin land shorter than the same Swing against a no-spin Feed', () => {
     const { idealAtMs } = makeFeed();
-    const contactTarget = (feedTopspin: number) => {
-      const played = playFeed({ swingsAtMs: [idealAtMs - 100], swing: { peakSpeed: 5.5, vertPath: 0 }, feedTopspin });
+    const contactTarget = (incomingTopspin: number) => {
+      const played = playFeed({ swingsAtMs: [idealAtMs - 100], swing: { peakSpeed: 5.5, vertPath: 0 }, incomingTopspin });
       return (played.events.find((e) => e.type === 'contact') as Extract<ShotEvent, { type: 'contact' }>).plan.target;
     };
     const plain = contactTarget(0);
@@ -625,7 +636,7 @@ describe('feedResult', () => {
 describe('a Feed that never reaches the player', () => {
   it('is a Miss at once, so the Streak still resets', () => {
     const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right', random: noScatter });
-    resolver.startFeed({ idealAtMs: null, topspin: 0 });
+    resolver.startIncoming({ idealAtMs: null, topspin: 0 });
     const ball = makeFeed().ball;
     expect(resolver.update(16, ball, [])).toEqual([{ type: 'miss' }]);
     expect(resolver.update(32, ball, [])).toEqual([]);

@@ -1,7 +1,8 @@
 /**
  * Shot resolver (SPEC "Shot resolver and target solver", ADR 0001): decides
- * from Swing timing alone whether a Feed is returned, and where the Return goes.
- * The game never checks whether the Paddle touches the ball.
+ * from Swing timing alone whether an incoming Shot (a Feed, or in a Match the
+ * Opponent's Shot) is returned, and where the Return goes. The game never
+ * checks whether the Paddle touches the ball.
  */
 
 import type { SwingEvent } from '../input/types.ts';
@@ -23,8 +24,8 @@ import {
   RETURN_SAFE_FRACTION,
   RETURN_SCATTER_M,
   RETURN_TOPSPIN_MAX_REVS,
+  SPIN_ANSWER_FULL_REVS,
   SPIN_ANSWER_M,
-  FEED_SPIN_MAX_REVS,
   SWING_FAST,
   SWING_MIN_RISE,
   SWING_ON,
@@ -71,10 +72,10 @@ export interface ResolverParams {
   liftFull: number;
   /** Topspin of a Return with Lift 1, revolutions/s. */
   returnTopspinMaxRevs: number;
-  /** `SPIN_ANSWER_M`: how far an unanswered Feed spin moves a Return's landing spot, metres. */
+  /** `SPIN_ANSWER_M`: how far an unanswered incoming spin moves a Return's landing spot, metres. */
   spinAnswerM: number;
-  /** `FEED_SPIN_MAX_REVS`: the Feed Topspin (rev/s) that counts as full spin when answering it. */
-  feedSpinMaxRevs: number;
+  /** `SPIN_ANSWER_FULL_REVS`: the incoming Topspin (rev/s) that counts as full spin when answering it. */
+  spinAnswerFullRevs: number;
 }
 
 /** What a Return is planned from: an accepted Swing, its timing and the player's hand. */
@@ -86,13 +87,13 @@ export interface ReturnInput {
   vertPath: number;
   side: SwingEvent['side'];
   hand: Hand;
-  /** Topspin of the Feed being returned, rad/s (negative = Backspin). */
-  feedTopspin: number;
+  /** Topspin of the incoming Shot being returned, rad/s (negative = Backspin). */
+  incomingTopspin: number;
 }
 
 /** Where and how fast a Return is aimed; the target solver turns it into a launch. */
 export interface ReturnPlan {
-  /** Landing spot on the Feeder's half (z < 0), or past its edge for a deliberate miss. */
+  /** Landing spot on the far half (z < 0: the Opponent's, or the Feeder's), or past its edge for a deliberate miss. */
   target: TablePoint;
   /** Simulated seconds from contact to landing. */
   flightTime: number;
@@ -141,21 +142,21 @@ export function planReturn(input: ReturnInput, params: ResolverParams, random: (
   const lift = liftOf(input.vertPath, params.minRise, params.liftFull);
   const topspin = lift * revsToRadPerSec(params.returnTopspinMaxRevs);
   const targetX = x + scatter();
-  const finalDepth = answerSpin(depth - scatter(), input.feedTopspin, lift, params);
+  const finalDepth = answerSpin(depth - scatter(), input.incomingTopspin, lift, params);
   return { target: { x: targetX, z: -finalDepth }, flightTime, quality, lift, topspin };
 }
 
 /**
- * Answer a Feed's spin by moving a Return's depth past the net (ADR 0001: only the target moves).
- * With `s` the Feed's Topspin as a share of `feedSpinMaxRevs`, in [−1, 1]: against Backspin, depth
+ * Answer an incoming Shot's spin by moving a Return's depth past the net (ADR 0001: only the
+ * target moves). With `s` its Topspin as a share of `spinAnswerFullRevs`, in [−1, 1]: against Backspin, depth
  * shrinks by `spinAnswerM × max(0, −s − lift)`; against Topspin it grows by
  * `spinAnswerM × max(0, lift − (1 − s))`. The shortening never takes the Return closer than
  * `RETURN_MIN_DEPTH_M`, but never pushes out one that was already closer. `depth` is the final
  * depth including scatter, so the minimum holds for the target the solver gets.
  */
-function answerSpin(depth: number, feedTopspin: number, lift: number, params: ResolverParams): number {
-  const fullSpin = revsToRadPerSec(params.feedSpinMaxRevs);
-  const s = fullSpin > 0 && Number.isFinite(feedTopspin) ? Math.min(1, Math.max(-1, feedTopspin / fullSpin)) : 0;
+function answerSpin(depth: number, incomingTopspin: number, lift: number, params: ResolverParams): number {
+  const fullSpin = revsToRadPerSec(params.spinAnswerFullRevs);
+  const s = fullSpin > 0 && Number.isFinite(incomingTopspin) ? Math.min(1, Math.max(-1, incomingTopspin / fullSpin)) : 0;
   if (s < 0) {
     const shortened = depth - params.spinAnswerM * Math.max(0, -s - lift);
     return Math.max(shortened, Math.min(depth, RETURN_MIN_DEPTH_M));
@@ -193,7 +194,7 @@ export function knobResolverParams(): ResolverParams {
     liftFull: LIFT_FULL.value,
     returnTopspinMaxRevs: RETURN_TOPSPIN_MAX_REVS.value,
     spinAnswerM: SPIN_ANSWER_M.value,
-    feedSpinMaxRevs: FEED_SPIN_MAX_REVS.value,
+    spinAnswerFullRevs: SPIN_ANSWER_FULL_REVS,
   };
 }
 
@@ -267,18 +268,18 @@ export function feedResult(event: ShotEvent): 'returned' | 'failed' | null {
   }
 }
 
-/** The part of a Feed the resolver judges against. */
-export interface FeedTiming {
-  /** The Feed's Ideal Time on the performance.now() clock; null if it never reaches the player. */
+/** The part of an incoming Shot (a Feed, or the Opponent's) the resolver judges against. */
+export interface IncomingTiming {
+  /** Its Ideal Time on the performance.now() clock; null if it never reaches the player. */
   readonly idealAtMs: number | null;
-  /** The Feed's Topspin, rad/s (negative = Backspin): the Swing's Lift must answer it. */
+  /** Its Topspin, rad/s (negative = Backspin): the Swing's Lift must answer it. */
   readonly topspin: number;
 }
 
 export interface ShotResolver {
-  /** A new Feed was launched: its one try is available. */
-  startFeed(feed: FeedTiming): void;
-  /** Judge a Swing, received at `nowMs`. Swings with no Feed to judge, or after the try is used, are ignored. */
+  /** A Shot toward the player was launched (a Feed or the Opponent's): its one try is available. */
+  startIncoming(incoming: IncomingTiming): void;
+  /** Judge a Swing, received at `nowMs`. Swings with no incoming Shot to judge, or after the try is used, are ignored. */
   swing(swing: SwingEvent, nowMs: number): ShotEvent[];
   /**
    * Once per frame, after physics: `ball` is the ball in play and
@@ -312,8 +313,8 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
   let state: FeedState = { phase: 'none' };
 
   return {
-    startFeed(feed) {
-      state = { phase: 'open', idealAtMs: feed.idealAtMs, topspin: feed.topspin, earlyDelta: null };
+    startIncoming(incoming) {
+      state = { phase: 'open', idealAtMs: incoming.idealAtMs, topspin: incoming.topspin, earlyDelta: null };
     },
 
     swing(swing, nowMs) {
@@ -329,7 +330,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         state = { phase: 'done' };
         return [{ type: 'late', delta }];
       }
-      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand(), feedTopspin: state.topspin }, params, random);
+      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand(), incomingTopspin: state.topspin }, params, random);
       const accepted = { type: 'accepted', swing, delta, contactAtMs: Math.max(nowMs, state.idealAtMs), plan } as const;
       state = { phase: 'accepted', accepted };
       return [accepted];

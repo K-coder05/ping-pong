@@ -34,7 +34,7 @@ import {
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './game/constants.ts';
-import { createGameCore } from './game/core.ts';
+import { createGameCore, gameModeFromSearch } from './game/core.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
 import { handedness } from './game/handedness.ts';
@@ -192,8 +192,11 @@ const ballStatus = createBallStatusReadout();
 const seed = seedFromSearch(window.location.search);
 console.log(`[seed] ${seed} (reload with ?seed=${seed} to replay)`);
 
-/** The game: the ball in play, the Feeder, the shot resolver and the Streak. */
-const core = createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: hittingHand });
+/**
+ * The game: the ball in play, the Feeder, the shot resolver and the Streak.
+ * `?mode=match` plays Rallies against the scripted Opponent instead of Return Drill.
+ */
+const core = createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: hittingHand, mode: gameModeFromSearch(window.location.search) });
 const sounds = createSounds();
 unlockAudioOnGesture(sounds);
 

@@ -19,7 +19,8 @@ import {
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './constants.ts';
-import { createFeeder, findIdealTime, type Feed, type Feeder } from './feeder.ts';
+import { createFeeder, type Feed, type Feeder } from './feeder.ts';
+import { findIdealTime } from './rally.ts';
 import { revsToRadPerSec } from '../physics/spin.ts';
 import { createSimClock } from './simClock.ts';
 import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type SolveOptions } from './solver.ts';
@@ -29,7 +30,7 @@ describe('Ideal Time', () => {
     const { velocity } = solveShot(FEEDER_MOUTH, { target: { x: -0.3, z: 0.7 }, flightTime: 1.0, topspin: 0, sidespin: 0 })!;
     const feed = launchBall(FEEDER_MOUTH, velocity);
 
-    const ideal = findIdealTime(feed);
+    const ideal = findIdealTime(feed, 'player');
     expect(ideal).not.toBeNull();
 
     // Step the same Feed by hand, through the substep that contains the Ideal Time.
@@ -69,14 +70,14 @@ describe('Ideal Time', () => {
       for (const z of zs) {
         const solution = solveShot(FEEDER_MOUTH, { target: { x, z }, flightTime, topspin: 0, sidespin: 0 });
         expect(solution, `solve (${x}, ${z})`).not.toBeNull();
-        expect(findIdealTime(launchBall(FEEDER_MOUTH, solution!.velocity)), `target (${x}, ${z})`).not.toBeNull();
+        expect(findIdealTime(launchBall(FEEDER_MOUTH, solution!.velocity), 'player'), `target (${x}, ${z})`).not.toBeNull();
       }
     }
   });
 
   it('is null for a ball that never reaches the player end after a bounce on the player half', () => {
     const intoNet = launchBall({ x: 0, y: FEEDER_MOUTH.y - 0.25, z: -0.6 }, { x: 0, y: 0, z: 6 });
-    expect(findIdealTime(intoNet)).toBeNull();
+    expect(findIdealTime(intoNet, 'player')).toBeNull();
   });
 });
 

@@ -21,7 +21,7 @@
  * starts the wait and the cue over, giving the player time to get ready.
  */
 
-import { launchBall, simulate, type BallState, type Vec3 } from './ball.ts';
+import { launchBall, type BallState } from './ball.ts';
 import {
   BALL_RADIUS,
   FEED_COUNTDOWN_FROM,
@@ -38,55 +38,14 @@ import {
   FEED_TARGET_Z_MIN,
   FEEDER_MOUTH,
   HIT_WINDOW_MS,
-  PHYSICS_DT,
-  PLAYER_END_Z,
   TABLE_TOP_Y,
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './constants.ts';
 import { revsToRadPerSec } from '../physics/spin.ts';
+import { findIdealTime, type IdealTime } from './rally.ts';
 import { simSecondsToRealMs } from './simClock.ts';
 import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type TablePoint } from './solver.ts';
-
-/** When and where a Feed reaches the player's end of the table, after its bounce. */
-export interface IdealTime {
-  /** Simulated seconds after launch. Convert to real time with `simSecondsToRealMs`. */
-  simSeconds: number;
-  /** Ball centre as it crosses z = PLAYER_END_Z. */
-  position: Vec3;
-}
-
-/** Longest look-ahead: a slow Feed reaches the player's end well inside this. */
-const IDEAL_TIME_HORIZON_S = 4;
-
-/**
- * Simulate a just-launched Feed ahead (deterministic, same integrator) to find
- * its Ideal Time: the moment its centre crosses the player's end of the table
- * after bouncing on the player's half. Null if it never does (net, out first).
- * Time and position are interpolated within the crossing substep.
- */
-export function findIdealTime(feed: BallState): IdealTime | null {
-  let previous = feed;
-  let ideal: IdealTime | null = null;
-  simulate(feed, {
-    maxTime: IDEAL_TIME_HORIZON_S,
-    until: (state, time) => {
-      const before = previous;
-      previous = state;
-      if (state.status !== 'live') return true;
-      if (state.lastBounceHalf !== 'player' || state.position.z < PLAYER_END_Z) return false;
-      const a = before.position;
-      const b = state.position;
-      const f = b.z === a.z ? 1 : Math.min(1, Math.max(0, (PLAYER_END_Z - a.z) / (b.z - a.z)));
-      ideal = {
-        simSeconds: time - (1 - f) * PHYSICS_DT,
-        position: { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f },
-      };
-      return true;
-    },
-  });
-  return ideal;
-}
 
 /** One Feed, as launched. */
 export interface Feed {
@@ -170,6 +129,13 @@ export interface FeederOptions {
   random: () => number;
   /** The target solver; `solveShot` unless a test stands one in. */
   solve?: ShotSolver;
+  /**
+   * While this returns true, the rally is not over even if the ball is done
+   * (in a Match, until the referee has called the Rally End: a late but
+   * accepted Swing can still strike a ball that has dropped past the table).
+   * Return Drill leaves it out.
+   */
+  holdRally?: () => boolean;
 }
 
 /** Below this speed (m/s), on the table, a live ball has come to rest and the rally is over. */
@@ -226,7 +192,7 @@ export function createFeeder(options: FeederOptions): Feeder {
     update(frame, ball) {
       if (phase === 'feeding') {
         simSecondsSinceFeed += frame.simSeconds;
-        if (ballIsDone(ball) && !hitWindowIsOpen(currentFeed, frame.nowMs)) endRally(ball);
+        if (ballIsDone(ball) && !hitWindowIsOpen(currentFeed, frame.nowMs) && !options.holdRally?.()) endRally(ball);
         return;
       }
       if (paused) return;
@@ -315,7 +281,7 @@ function planFeed(random: () => number, solve: ShotSolver, flightTime: number, m
 function launchFeed(random: () => number, target: TablePoint, topspin: number, solution: ShotSolution, nowMs: number): Feed {
   const seed = Math.floor(random() * 2 ** 32);
   const ball = launchBall(FEEDER_MOUTH, solution.velocity, solution.spin, seed);
-  const idealTime = findIdealTime(ball);
+  const idealTime = findIdealTime(ball, 'player');
   return {
     ball,
     target,
