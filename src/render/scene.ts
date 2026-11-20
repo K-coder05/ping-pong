@@ -36,7 +36,9 @@ import {
   TABLE_TOP_Y,
   TABLE_WIDTH,
 } from '../game/constants.ts';
+import type { BodyPose } from '../opponent/motion.ts';
 import { drawnBall, drawnSpinRate } from './drawnBall.ts';
+import { createOpponentFigure } from './opponent.ts';
 import { PADDLE_BLADE_THICKNESS, type PaddlePose } from './paddle.ts';
 
 export interface Vec3Like {
@@ -65,6 +67,11 @@ export interface TableScene {
   syncIdealTimeMarker(marker: { position: Vec3Like; reached: boolean } | null): void;
   /** Draw the Paddle: blade centre at `position`, the Forehand (red) or Backhand (black) face toward the Feeder. */
   syncPaddle(pose: PaddlePose): void;
+  /**
+   * In a Match, draw the Opponent behind the far end in `pose` (the Feeder
+   * isn't there in a Match); null (Return Drill) shows the Feeder instead.
+   */
+  syncOpponent(pose: BodyPose | null): void;
   /** Resize the drawing buffer and the play camera to the canvas size. */
   resize(width: number, height: number): void;
   render(camera: PerspectiveCamera): void;
@@ -86,7 +93,10 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
   scene.background = new Color(0x1d2230);
 
   addLights(scene);
-  scene.add(createFloor(), createTable(), createNet(), createFeeder());
+  const feeder = createFeeder();
+  const opponent = createOpponentFigure();
+  opponent.root.visible = false;
+  scene.add(createFloor(), createTable(), createNet(), feeder, opponent.root);
 
   const ball = createBall();
   // The ball's orientation: its stripe's turning axis (local y) laid along the spin axis, then turned by `ballAngle`.
@@ -144,6 +154,11 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
       // Yaw first, then pitch about the blade's own horizontal axis. Turning
       // the blade over for a Backhand flips that axis, so the sign follows.
       paddle.rotation.set(pose.backhandFace ? pose.pitch : -pose.pitch, pose.yaw + (pose.backhandFace ? Math.PI : 0), 0, 'YXZ');
+    },
+    syncOpponent(pose) {
+      opponent.root.visible = pose !== null;
+      feeder.visible = pose === null;
+      if (pose) opponent.sync(pose);
     },
     resize(width, height) {
       renderer.setSize(width, height);

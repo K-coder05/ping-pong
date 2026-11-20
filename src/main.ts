@@ -27,6 +27,7 @@ import {
   CONTACT_ASSIST,
   LATENCY_EXTRAPOLATION,
   LATENCY_EXTRAPOLATION_MS,
+  MAX_FRAME_DT,
   MOUSE_SHOULDER_WIDTH,
   PADDLE_MAPPING_RANGE,
   PADDLE_REST_PY,
@@ -39,6 +40,7 @@ import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
 import { createBrain } from './opponent/brain.ts';
 import { DIFFICULTIES, difficultyFromSearch } from './opponent/difficulty.ts';
+import { BODY_PARAMS, READY_POSE, followOpponentPlan, planBody, type BodyPlan, type BodyPose } from './opponent/motion.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { onboardingSteps, runOnboarding } from './game/onboarding.ts';
@@ -299,6 +301,22 @@ function idealTimeMarker() {
   return { position: ideal.position, reached: sinceFeed >= ideal.simSeconds };
 }
 
+/**
+ * The Opponent's body (Match only): it plays the core's `opponentPlan`, held
+ * through the follow-through after the core clears it at the strike. Purely
+ * cosmetic (ADR 0002): nothing here feeds back into the core.
+ */
+let opponentBodyPlan: BodyPlan | null = null;
+let opponentPose: BodyPose = READY_POSE;
+
+/** One frame of the Opponent's body: simulated time runs at TIME_SCALE, capped like the core's. */
+function updateOpponentBody(nowMs: number, elapsedSeconds: number): BodyPose {
+  const timeScale = TIME_SCALE.value;
+  opponentBodyPlan = followOpponentPlan(core.opponentPlan, opponentBodyPlan, (incoming) => ((nowMs - incoming.launchedAtMs) / 1000) * timeScale);
+  opponentPose = planBody(opponentPose, opponentBodyPlan, Math.min(elapsedSeconds, MAX_FRAME_DT) * timeScale, BODY_PARAMS[difficulty]);
+  return opponentPose;
+}
+
 function resize(): void {
   const width = window.innerWidth;
   const height = window.innerHeight;
@@ -327,6 +345,7 @@ function frame(now: number): void {
   tableScene.syncBall(core.ball.position, core.ball.spin);
   tableScene.syncPaddle(paddle.update(now, handPositions.latest));
   tableScene.syncIdealTimeMarker(idealTimeMarker());
+  tableScene.syncOpponent(core.mode === 'match' ? updateOpponentBody(now, elapsedSeconds) : null);
   tableScene.render(debug.camera);
 }
 
