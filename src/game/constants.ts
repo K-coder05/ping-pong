@@ -150,6 +150,14 @@ export const FEED_COUNTDOWN_STEP_S = knobs.number({ name: 'FEED_COUNTDOWN_STEP_S
 
 /** Horizontal speed kept by a table bounce (friction). */
 export const BOUNCE_FRICTION = knobs.number({ name: 'BOUNCE_FRICTION', min: 0.5, max: 1, step: 0.01, default: 0.9, group: 'Physics' });
+/**
+ * Magnus constant kM: the ball's sideways push is kM·(ω × v). 0.003 gives
+ * 7.5 m/s² for 50 rev/s at 8 m/s, comparable to gravity: a game-feel guess,
+ * not a measured value (spec P1-a). Tuned in the physics view (P1-d).
+ */
+export const MAGNUS_K = knobs.number({ name: 'MAGNUS_K', min: 0, max: 0.01, step: 0.0001, default: 0.003, group: 'Physics' });
+/** Spin decay time constant: Spin falls to 1/e after this many simulated seconds. */
+export const SPIN_TAU_S = knobs.number({ name: 'SPIN_TAU_S', min: 0.5, max: 20, step: 0.5, default: 4, group: 'Physics' });
 
 /**
  * The player's Timing Offset: how much later the game sees a Swing Onset than

@@ -1,6 +1,8 @@
 /**
- * Ball physics: a point mass under gravity and air drag, stepped at a fixed
- * PHYSICS_DT with a hand-written table bounce (SPEC "Feeder and ball physics").
+ * Ball physics: a point mass under gravity, air drag and the Magnus force of
+ * its Spin (`physics/flight.ts`), stepped at a fixed PHYSICS_DT with a
+ * hand-written table bounce (SPEC "Feeder and ball physics"). Spin fades in
+ * flight; bounces and the net don't change it yet.
  *
  * Everything here is pure and headless: the game loop steps it in real time,
  * and the Feeder and target solver call `simulate` to look ahead.
@@ -19,20 +21,23 @@ import {
   FLOOR_FRICTION,
   FLOOR_RESTITUTION,
   GRAVITY,
+  MAGNUS_K,
   NET_HEIGHT,
   NET_LENGTH,
   NET_REBOUND,
   PHYSICS_DT,
   SETTLE_SPEED,
+  SPIN_TAU_S,
   TABLE_HALF_LENGTH,
   TABLE_RESTITUTION,
   TABLE_TOP_Y,
   TABLE_WIDTH,
 } from './constants.ts';
 
-import type { Vec3 } from '../physics/vec3.ts';
+import { decaySpin, flightAcceleration, type FlightParams } from '../physics/flight.ts';
+import { add, scale, ZERO, type Vec3 } from '../physics/vec3.ts';
 
-export type { Vec3 };
+export type { FlightParams, Vec3 };
 
 /** Which half of the table, split by the net at z = 0. */
 export type TableHalf = 'player' | 'feeder';
@@ -43,6 +48,10 @@ export type BallStatus = 'live' | 'dead' | 'out';
 export interface BallState {
   readonly position: Readonly<Vec3>;
   readonly velocity: Readonly<Vec3>;
+  /** Spin vector, rad/s (`physics/spin.ts` builds it from Topspin and Sidespin). */
+  readonly spin: Readonly<Vec3>;
+  /** Per-Shot seed, for randomness at contacts (the Net-cord); 0 unless the launcher draws one. */
+  readonly seed: number;
   readonly status: BallStatus;
   /** Half of the latest table bounce since launch while live, or null before the first one. */
   readonly lastBounceHalf: TableHalf | null;
@@ -67,9 +76,14 @@ export interface TimedBallEvent {
   readonly time: number;
 }
 
-/** A fresh, live ball in flight from `position` with `velocity`. Use it for every Feed and Return. */
-export function launchBall(position: Vec3, velocity: Vec3): BallState {
-  return { position: { ...position }, velocity: { ...velocity }, status: 'live', lastBounceHalf: null };
+/** A fresh, live ball in flight from `position` with `velocity` and `spin`. Use it for every Feed and Return. */
+export function launchBall(position: Vec3, velocity: Vec3, spin: Vec3 = ZERO, seed = 0): BallState {
+  return { position: { ...position }, velocity: { ...velocity }, spin: { ...spin }, seed, status: 'live', lastBounceHalf: null };
+}
+
+/** The flight parameters from the live knobs; `stepBall` and `simulate` use these by default. */
+export function knobFlightParams(): FlightParams {
+  return { g: GRAVITY, k: DRAG_K, kM: MAGNUS_K.value, spinTau: SPIN_TAU_S.value };
 }
 
 /** Ball centre height when its bottom touches the table top. */
@@ -84,17 +98,17 @@ interface Crossing {
 }
 
 /** Advance one substep. Collisions are swept along the substep, so a fast ball can't skip through. */
-export function stepBall(state: BallState, dt: number = PHYSICS_DT): { state: BallState; events: BallEvent[] } {
+export function stepBall(
+  state: BallState,
+  dt: number = PHYSICS_DT,
+  params: FlightParams = knobFlightParams(),
+): { state: BallState; events: BallEvent[] } {
   const events: BallEvent[] = [];
   let { status, lastBounceHalf } = state;
   const p = { ...state.position };
-  const v = { ...state.velocity };
 
-  // Semi-implicit Euler: a = g − k|v|v, then v += a·dt, then p += v·dt.
-  const speed = Math.hypot(v.x, v.y, v.z);
-  v.x += -DRAG_K * speed * v.x * dt;
-  v.y += (GRAVITY - DRAG_K * speed * v.y) * dt;
-  v.z += -DRAG_K * speed * v.z * dt;
+  // Semi-implicit Euler: a = g − k|v|v + kM(ω × v), then v += a·dt, then p += v·dt.
+  const v = add(state.velocity, scale(flightAcceleration(state.velocity, state.spin, params), dt));
 
   // Move along the substep, stopping at the earliest crossing, resolving it,
   // then carrying on with the new velocity for the time that is left.
@@ -140,7 +154,10 @@ export function stepBall(state: BallState, dt: number = PHYSICS_DT): { state: Ba
     events.push({ type: 'out', reason: 'off-table', position: { ...p } });
   }
 
-  return { state: { position: p, velocity: v, status, lastBounceHalf }, events };
+  // Spin fades in flight; contacts don't change it in this model.
+  const spin = decaySpin(state.spin, dt, params.spinTau);
+
+  return { state: { position: p, velocity: v, spin, seed: state.seed, status, lastBounceHalf }, events };
 }
 
 /**
@@ -206,15 +223,18 @@ export interface Simulation {
   events: TimedBallEvent[];
 }
 
-/** Run the same integrator ahead without rendering. Deterministic for a given start and knob values. */
-export function simulate(start: BallState, options: SimulateOptions): Simulation {
+/**
+ * Run the same integrator ahead without rendering. Deterministic for a given
+ * start and flight parameters; without `params`, it reads the knobs once at the start.
+ */
+export function simulate(start: BallState, options: SimulateOptions, params: FlightParams = knobFlightParams()): Simulation {
   let state = start;
   let time = 0;
   const events: TimedBallEvent[] = [];
   // Count whole substeps (not summed floats), so maxTime = n·PHYSICS_DT runs exactly n substeps.
   const maxSteps = Math.round(options.maxTime / PHYSICS_DT);
   for (let i = 1; i <= maxSteps; i++) {
-    const step = stepBall(state);
+    const step = stepBall(state, PHYSICS_DT, params);
     state = step.state;
     time = i * PHYSICS_DT;
     for (const event of step.events) events.push({ event, time });

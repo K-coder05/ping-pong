@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { launchBall, simulate, stepBall } from './ball.ts';
-import { BALL_RADIUS, PHYSICS_DT, TABLE_TOP_Y, TABLE_WIDTH } from './constants.ts';
+import { knobFlightParams, launchBall, simulate, stepBall, type BallState, type Vec3 } from './ball.ts';
+import { BALL_RADIUS, DRAG_K, FEEDER_MOUTH, GRAVITY, PHYSICS_DT, TABLE_TOP_Y, TABLE_WIDTH } from './constants.ts';
+import { revsToRadPerSec, spinVector } from '../physics/spin.ts';
+import { cross, length, scale } from '../physics/vec3.ts';
 
 /** Height of the ball's bottom above the table top. */
 const heightAboveTable = (y: number) => y - BALL_RADIUS - TABLE_TOP_Y;
@@ -199,5 +201,145 @@ describe('ball physics', () => {
         expect(state.status).toBe('dead');
       });
     }
+  });
+
+  describe('spin in flight', () => {
+    it('builds its flight parameters from the knobs, at the spec starting values', () => {
+      expect(knobFlightParams()).toEqual({ g: GRAVITY, k: DRAG_K, kM: 0.003, spinTau: 4 });
+    });
+
+    it('a new ball has no spin and seed 0 unless given them', () => {
+      const plain = launchBall({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: -5 });
+      expect(plain.spin).toEqual({ x: 0, y: 0, z: 0 });
+      expect(plain.seed).toBe(0);
+
+      const spin = { x: -100, y: 0, z: 0 };
+      const spun = launchBall({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: -5 }, spin, 42);
+      expect(spun.spin).toEqual(spin);
+      expect(spun.spin).not.toBe(spin);
+      expect(spun.seed).toBe(42);
+    });
+
+    // Golden values from the integrator before spin (commit a8eec49): positions
+    // after 1 s (240 substeps) with the default knobs. The Feed is the solver's
+    // launch from FEEDER_MOUTH to (0.3, 0.75) in 1 s; the hard Return its launch
+    // from the player's end to (−0.2, −1.2) in 0.55 s. Both bounce once.
+    const GOLDEN = [
+      {
+        name: 'a Feed',
+        from: FEEDER_MOUTH,
+        velocity: { x: 0.4018, y: 4.625, z: 2.8393 },
+        after1s: { x: 0.3166587085323193, y: 1.0333047471443821, z: 0.8676532382673328 },
+      },
+      {
+        name: 'a hard Return',
+        from: { x: 0.1, y: TABLE_TOP_Y + 0.3, z: 1.37 },
+        velocity: { x: -0.6857, y: 2.1887, z: -5.8746 },
+        after1s: { x: -0.3754921966955337, y: 0.8392398569562248, z: -2.703685954072605 },
+      },
+    ];
+    for (const { name, from, velocity, after1s } of GOLDEN) {
+      it(`with zero spin, ${name} is where the old integrator put it after 1 s (within 1 mm)`, () => {
+        const run = simulate(launchBall(from, velocity), { maxTime: 1 });
+        expect(run.events).toHaveLength(1);
+        expect(run.events[0]!.event.type).toBe('bounce');
+        const p = run.state.position;
+        expect(Math.hypot(p.x - after1s.x, p.y - after1s.y, p.z - after1s.z)).toBeLessThan(0.001);
+      });
+    }
+
+    // 8 m/s toward the Feeder, 10° up, from (0, 1.0, 1.2).
+    const FROM = { x: 0, y: 1.0, z: 1.2 };
+    const UP_10 = (10 * Math.PI) / 180;
+    const LAUNCH = { x: 0, y: 8 * Math.sin(UP_10), z: -8 * Math.cos(UP_10) };
+    const TOWARD_FEEDER = { x: 0, y: 0, z: -1 };
+    const CONTACT_Y = TABLE_TOP_Y + BALL_RADIUS;
+
+    /** Where the centre first comes down to table-contact height (on the table or past it). */
+    function landing(spin: Vec3): Vec3 {
+      let before: BallState = launchBall(FROM, LAUNCH, spin);
+      let at: Vec3 | null = null;
+      simulate(before, {
+        maxTime: 3,
+        until: (state, _time, events) => {
+          const bounce = events.find((e) => e.type === 'bounce');
+          if (bounce) at = bounce.position;
+          else if (state.position.y <= CONTACT_Y && state.velocity.y < 0) {
+            const f = (before.position.y - CONTACT_Y) / (before.position.y - state.position.y);
+            const a = before.position;
+            const b = state.position;
+            at = { x: a.x + (b.x - a.x) * f, y: CONTACT_Y, z: a.z + (b.z - a.z) * f };
+          }
+          before = state;
+          return at !== null;
+        },
+      });
+      if (!at) throw new Error('never came down to the table');
+      return at;
+    }
+
+    const noSpin = landing({ x: 0, y: 0, z: 0 });
+
+    it('Topspin 50 rev/s lands at least 15 cm shorter than no spin', () => {
+      const topspin = landing(spinVector(revsToRadPerSec(50), 0, TOWARD_FEEDER));
+      // Shorter = less far toward the Feeder (−z).
+      expect(topspin.z - noSpin.z).toBeGreaterThanOrEqual(0.15);
+    });
+
+    it('Backspin 50 rev/s lands at least 15 cm longer than no spin', () => {
+      const backspin = landing(spinVector(-revsToRadPerSec(50), 0, TOWARD_FEEDER));
+      expect(noSpin.z - backspin.z).toBeGreaterThanOrEqual(0.15);
+    });
+
+    it('Sidespin 20 rev/s moves the landing at least 5 cm sideways, toward ŷ × v', () => {
+      const sidespin = revsToRadPerSec(20);
+      const landed = landing(spinVector(0, sidespin, TOWARD_FEEDER));
+      const shift = landed.x - noSpin.x;
+      const expectedSide = Math.sign(cross(scale({ x: 0, y: 1, z: 0 }, sidespin), LAUNCH).x);
+      expect(Math.abs(shift)).toBeGreaterThanOrEqual(0.05);
+      expect(Math.sign(shift)).toBe(expectedSide);
+    });
+
+    it('spin falls to 1/e of its start after one decay time constant (within 1%)', () => {
+      const params = { ...knobFlightParams(), spinTau: 0.5 };
+      const start = { x: -314, y: 30, z: 0 };
+      const ball = launchBall({ x: 0, y: 3, z: 0.5 }, { x: 0, y: 0, z: -1 }, start);
+
+      const run = simulate(ball, { maxTime: params.spinTau }, params);
+
+      const ratio = length(run.state.spin) / length(start);
+      expect(Math.abs(ratio / Math.exp(-1) - 1)).toBeLessThan(0.01);
+    });
+
+    it('stepping the ball does not mutate its input', () => {
+      const ball = launchBall({ x: 0, y: TABLE_TOP_Y + 0.05, z: 0.3 }, { x: 0.5, y: -3, z: -4 }, { x: -200, y: 40, z: 0 }, 7);
+      const frozen: BallState = Object.freeze({
+        ...ball,
+        position: Object.freeze({ ...ball.position }),
+        velocity: Object.freeze({ ...ball.velocity }),
+        spin: Object.freeze({ ...ball.spin }),
+      });
+      const copy = structuredClone(frozen);
+
+      // Several substeps through a table bounce, with the default and an explicit step.
+      let state = frozen;
+      for (let i = 0; i < 20; i++) state = stepBall(state, i % 2 ? undefined : PHYSICS_DT / 2).state;
+      stepBall(frozen, PHYSICS_DT, knobFlightParams());
+
+      expect(frozen).toEqual(copy);
+      expect(state.seed).toBe(7);
+    });
+
+    it('a ball with spin keeps its seed and spin through a bounce (bounces don\'t change spin yet)', () => {
+      const params = { ...knobFlightParams(), spinTau: Infinity };
+      const spin = { x: -150, y: 0, z: 0 };
+      const ball = launchBall({ x: 0, y: TABLE_TOP_Y + 0.2, z: 0.7 }, { x: 0, y: 0, z: 0 }, spin, 99);
+
+      const run = simulate(ball, { maxTime: 0.5 }, params);
+
+      expect(run.events.map((e) => e.event.type)).toContain('bounce');
+      expect(run.state.spin).toEqual(spin);
+      expect(run.state.seed).toBe(99);
+    });
   });
 });
