@@ -2,8 +2,21 @@ import { describe, expect, it } from 'vitest';
 import type { SwingEvent } from '../input/types.ts';
 import type { Hand } from '../sensing/landmarks.ts';
 import { launchBall, simulate, stepBall, type BallEvent, type BallState, type Vec3 } from './ball.ts';
-import { BALL_RADIUS, OPPONENT_END_Z, FEED_SPIN_MAX_REVS, FEEDER_MOUTH, PLAYER_END_Z, SPIN_ANSWER_FULL_REVS, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
+import {
+  BALL_RADIUS,
+  OPPONENT_END_Z,
+  FEED_SPIN_MAX_REVS,
+  FEEDER_MOUTH,
+  PLAYER_END_Z,
+  SERVE_BOUNCE1_Z_DEEP,
+  SERVE_BOUNCE1_Z_SHORT,
+  SPIN_ANSWER_FULL_REVS,
+  TABLE_TOP_Y,
+  TIMING_OFFSET_MS,
+} from './constants.ts';
+import { makeRng } from '../util/rng.ts';
 import { findIdealTime } from './rally.ts';
+import { findTossIdealTime, judgeServe, launchToss, solveServe, type ServeIntent } from './serve.ts';
 import {
   createShotResolver,
   feedResult,
@@ -11,8 +24,12 @@ import {
   knobResolverParams,
   liftOf,
   planReturn,
+  planServe,
+  serveIntentOf,
+  solvePlannedServe,
   solveReturn,
   type ResolverParams,
+  type ServeInput,
   type ShotEvent,
 } from './shotResolver.ts';
 import { revsToRadPerSec, spinVector } from '../physics/spin.ts';
@@ -83,6 +100,12 @@ describe('Hit Window', () => {
 
 /** Random numbers that give no scatter at all (the middle of [0, 1)). */
 const noScatter = () => 0.5;
+
+/** A `random` that returns `values` in turn, over and over. */
+function sequence(...values: number[]): () => number {
+  let i = 0;
+  return () => values[i++ % values.length]!;
+}
 
 describe('Return direction from timing', () => {
   // World x: + is the player's right (screen right from the play camera).
@@ -647,5 +670,170 @@ describe('Swings with no Feed', () => {
   it('are ignored', () => {
     const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right', random: noScatter });
     expect(resolver.swing({ t: 0, peakSpeed: 5, side: 'forehand', vertPath: 0 }, 0)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The player's Serve (spec P2-f2): planned like a Return, struck from the toss
+// ---------------------------------------------------------------------------
+
+/** A medium-speed Swing between SPEC's SWING_ON and SWING_FAST. */
+const MEDIUM = (SPEC.swingOn + SPEC.swingFast) / 2;
+
+/** The right-hander's toss and where its Serve is struck from. */
+function tossFor(hand: Hand = 'right') {
+  const ball = launchToss(hand);
+  const { ideal, strike } = findTossIdealTime(ball)!;
+  return { ball, idealAtMs: ideal.simSeconds * 1000, strike: strike.position };
+}
+
+/** Plan, solve and launch a Serve from the toss for this Swing, and call it under the Serve rules. */
+function serveOutcome(input: ServeInput, random: () => number, params: ResolverParams = SPEC) {
+  const { strike } = tossFor(input.hand);
+  const plan = planServe(input, strike, params, random);
+  const solution = solvePlannedServe(solveServe, strike, serveIntentOf(plan));
+  const ball = launchBall(strike, solution.velocity, solution.spin, Math.floor(random() * 2 ** 32));
+  return { plan, result: judgeServe(ball, 'player') };
+}
+
+describe('planServe', () => {
+  const onTime: ServeInput = { delta: 0, peakSpeed: MEDIUM, vertPath: 0, side: 'forehand', hand: 'right' };
+
+  it('aims where planReturn would, with the same random draws, and the first bounce on the player\'s half on the line to it', () => {
+    const { strike } = tossFor();
+    const input: ServeInput = { ...onTime, delta: -80, vertPath: 2 };
+    const plan = planServe(input, strike, SPEC, sequence(0.2, 0.9));
+    const ret = planReturn({ ...input, incomingTopspin: 0 }, SPEC, sequence(0.2, 0.9));
+    expect(plan.target).toEqual(ret.target);
+    expect(plan).toMatchObject({ quality: ret.quality, lift: ret.lift, topspin: ret.topspin });
+    expect(plan.bounce1.z).toBeGreaterThanOrEqual(SERVE_BOUNCE1_Z_DEEP);
+    expect(plan.bounce1.z).toBeLessThanOrEqual(SERVE_BOUNCE1_Z_SHORT);
+    // On the line from the strike to the target.
+    const cross = (plan.bounce1.x - strike.x) * (plan.target.z - strike.z) - (plan.bounce1.z - strike.z) * (plan.target.x - strike.x);
+    expect(cross).toBeCloseTo(0, 9);
+  });
+
+  it('puts the first bounce nearer the player\'s end for a short Serve than for a deep one', () => {
+    const { strike } = tossFor();
+    const soft = planServe({ ...onTime, peakSpeed: SPEC.swingOn }, strike, SPEC, noScatter);
+    const fast = planServe({ ...onTime, peakSpeed: SPEC.swingFast }, strike, SPEC, noScatter);
+    expect(-soft.target.z).toBeLessThan(-fast.target.z);
+    expect(soft.bounce1.z).toBeGreaterThan(fast.bounce1.z);
+  });
+
+  it.each(['right', 'left'] as const)('is legal at timing 0 and medium speed (%s hand), flat or with full Lift, whatever the scatter draws', (hand) => {
+    for (const vertPath of [0, SPEC.liftFull]) {
+      for (let seed = 1; seed <= 5; seed++) {
+        const { plan, result } = serveOutcome({ ...onTime, hand, vertPath }, makeRng(seed));
+        expect(plan.target.z).toBeLessThan(0);
+        expect(result).toBe('legal');
+      }
+    }
+  });
+
+  it('is legal anywhere in the safe part of the Hit Window, at any speed', () => {
+    const random = makeRng(3);
+    for (const delta of [-0.7 * SPEC.hitWindowMs, -60, 0, 60, 0.7 * SPEC.hitWindowMs]) {
+      for (const peakSpeed of [SPEC.swingOn, MEDIUM, SPEC.swingFast]) {
+        for (const side of ['forehand', 'backhand'] as const) {
+          expect(serveOutcome({ ...onTime, delta, peakSpeed, side }, random).result).toBe('legal');
+        }
+      }
+    }
+  });
+
+  it('can Fault at the edge of the Hit Window with a fast Swing: its target moves long, past the Opponent\'s end', () => {
+    const random = makeRng(4);
+    const outcomes = Array.from({ length: 6 }, (_, i) => serveOutcome({ ...onTime, delta: (i % 2 ? 1 : -1) * SPEC.hitWindowMs, peakSpeed: SPEC.swingFast }, random));
+    for (const { plan } of outcomes) expect(plan.target.z).toBeLessThan(OPPONENT_END_Z);
+    expect(outcomes.map((o) => o.result)).toContain('fault');
+  });
+});
+
+describe('solvePlannedServe', () => {
+  const intent = { bounce1: { x: 0.2, z: 0.8 }, target: { x: -0.3, z: -0.9 }, flightTime: 0.2, topspin: 50, sidespin: 0 };
+  const from = { x: 0.3, y: TABLE_TOP_Y + 0.25, z: PLAYER_END_Z + 0.1 };
+  const solution = { velocity: { x: 0, y: 0, z: -5 }, spin: { x: 0, y: 0, z: 0 }, flightTime: 0.2, passes: 1 };
+
+  it('falls back to the same intent with no spin, then best effort with no spin: the target never moves', () => {
+    const calls: { intent: ServeIntent; bestEffort: boolean }[] = [];
+    const failing = ((_: Vec3, s: ServeIntent, _solve?: ShotSolver, opts?: { bestEffort?: boolean }) => {
+      calls.push({ intent: s, bestEffort: !!opts?.bestEffort });
+      return opts?.bestEffort ? solution : null;
+    }) as typeof solveServe;
+    expect(solvePlannedServe(failing, from, intent)).toBe(solution);
+    expect(calls.map((c) => [c.intent.topspin, c.bestEffort])).toEqual([
+      [50, false],
+      [0, false],
+      [0, true],
+    ]);
+    for (const c of calls) expect(c.intent.target).toEqual(intent.target);
+  });
+});
+
+/**
+ * Run the game loop for one toss (TIME_SCALE 1, 60 FPS): each frame steps the
+ * ball, hands any Swing that is due to the resolver, then updates it; a
+ * contact replaces the ball.
+ */
+function playToss(options: { swingsAtMs?: number[]; swing?: Partial<SwingEvent>; untilMs?: number } = {}) {
+  const toss = tossFor();
+  const resolver = createShotResolver({ params: () => SPEC, hand: () => 'right', random: noScatter });
+  resolver.startToss({ idealAtMs: toss.idealAtMs, strike: toss.strike });
+  let ball: BallState = toss.ball;
+  const pending = [...(options.swingsAtMs ?? [])];
+  const timeline: { atMs: number; event: ShotEvent }[] = [];
+  for (let now = FRAME_MS; now <= (options.untilMs ?? toss.idealAtMs + 3000); now += FRAME_MS) {
+    const frameEvents: BallEvent[] = [];
+    for (let i = 0; i < SUBSTEPS_PER_FRAME; i++) {
+      const step = stepBall(ball);
+      ball = step.state;
+      frameEvents.push(...step.events);
+    }
+    while (pending.length && pending[0]! <= now) {
+      const t = pending.shift()!;
+      for (const event of resolver.swing({ t, peakSpeed: MEDIUM, side: 'forehand', vertPath: 0, ...options.swing }, now)) timeline.push({ atMs: now, event });
+    }
+    for (const event of resolver.update(now, ball, frameEvents)) {
+      timeline.push({ atMs: now, event });
+      if (event.type === 'contact') ball = event.ball;
+    }
+  }
+  return { toss, timeline, events: timeline.map((e) => e.event), ball };
+}
+
+describe('a toss with a Swing in the Hit Window', () => {
+  it('serves at the toss\'s Ideal Time from its strike point, with a ServePlan, and judges nothing after', () => {
+    const { idealAtMs } = tossFor();
+    const played = playToss({ swingsAtMs: [idealAtMs - 50] });
+    expect(played.events.map((e) => e.type)).toEqual(['accepted', 'contact']);
+    const contact = played.timeline[1]!;
+    expect(contact.atMs).toBeGreaterThanOrEqual(idealAtMs);
+    expect(contact.atMs).toBeLessThan(idealAtMs + FRAME_MS);
+    if (contact.event.type !== 'contact') throw new Error('expected contact');
+    expect(contact.event.position).toEqual(played.toss.strike);
+    expect('bounce1' in contact.event.plan).toBe(true);
+    expect(judgeServe(contact.event.ball, 'player')).toBe('legal');
+  });
+
+  it('serves a late Swing from the strike point too, though the toss has dropped well below it', () => {
+    const { idealAtMs } = tossFor();
+    const played = playToss({ swingsAtMs: [idealAtMs + 180] });
+    expect(played.events.map((e) => e.type)).toEqual(['accepted', 'contact']);
+    const contact = played.events[1] as Extract<ShotEvent, { type: 'contact' }>;
+    expect(contact.position).toEqual(played.toss.strike);
+    expect(judgeServe(contact.ball, 'player')).toBe('legal');
+  });
+});
+
+describe('a missed toss', () => {
+  const { idealAtMs } = tossFor();
+
+  it('is Early before the Hit Window, Late after it, and a Miss with no Swing: nothing is struck', () => {
+    expect(playToss({ swingsAtMs: [idealAtMs - 300] }).events).toEqual([{ type: 'early', delta: expect.closeTo(-300, 6), final: true }]);
+    expect(playToss({ swingsAtMs: [idealAtMs + 250] }).events).toEqual([{ type: 'late', delta: expect.closeTo(250, 6) }]);
+    const missed = playToss();
+    expect(missed.events).toEqual([{ type: 'miss' }]);
+    expect(missed.ball.position.y).toBeLessThan(TABLE_TOP_Y); // the toss just drops
   });
 });

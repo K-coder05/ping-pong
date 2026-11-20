@@ -19,8 +19,9 @@ const FRAME_S = 1 / 60;
 
 /**
  * A scripted player: a medium-speed, flat Forehand seen exactly at the Ideal
- * Time of each Shot coming to it, but it lets a share `missChance` of them go by
- * (its own seeded draw), so both sides win Points.
+ * Time of each Shot coming to it (and of each of its Serve tosses, which come
+ * the same way), but it lets a share `missChance` of them go by (its own
+ * seeded draw), so both sides win Points; a missed toss is tossed again.
  */
 function scriptedPlayer(core: GameCore, missChance: number, random: () => number): (nowMs: number) => SwingEvent | null {
   let due: SwingEvent | null = null;
@@ -37,12 +38,14 @@ function scriptedPlayer(core: GameCore, missChance: number, random: () => number
 }
 
 describe.each(DIFFICULTY_ORDER)('Headless Match: the scripted player against %s', (name) => {
-  it('runs from the first Serve to match-over, every Serve legal, with a legal final score', () => {
+  it('runs from the first Serve to match-over, every Serve legal and by the Match\'s server, with a legal final score', () => {
     const core = createGameCore({ random: makeRng(77), resolverParams: knobResolverParams, hand: () => 'right', mode: 'match', opponent: createBrain(DIFFICULTIES[name]) });
     const nextSwing = scriptedPlayer(core, 0.05, makeRng(78));
     const rally: RallyEvent[] = [];
     const match: MatchEvent[] = [];
+    const servers: string[] = [];
     core.onRally((e) => rally.push(e));
+    core.onRally((e) => e.type === 'serve' && servers.push(core.match!.server));
     core.onMatch((e) => match.push(e));
     // One Game to 11: well under an hour of play.
     const maxFrames = Math.round(3600 / FRAME_S);
@@ -73,7 +76,10 @@ describe.each(DIFFICULTY_ORDER)('Headless Match: the scripted player against %s'
     points.forEach((p, i) => expect(p.to).toBe(otherSide(ends[i]!.loser)));
     const serves = rally.filter((e) => e.type === 'serve');
     expect(serves).toHaveLength(points.length);
-    expect(serves.every((e) => e.type === 'serve' && e.by === 'opponent' && e.result === 'legal')).toBe(true);
+    expect(serves.every((e) => e.type === 'serve' && e.result === 'legal')).toBe(true);
+    // Both sides served, each Serve by the Match's server.
+    expect(serves.map((e) => e.type === 'serve' && e.by)).toEqual(servers);
+    expect(new Set(servers)).toEqual(new Set(['player', 'opponent']));
     expect(ends.some((e) => e.end === 'fault')).toBe(false);
     console.log(`[match] ${name}: ${describeMatchEvent(points.at(-1)!)}`);
   });

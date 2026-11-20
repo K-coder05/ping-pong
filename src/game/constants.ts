@@ -88,6 +88,45 @@ export const FEED_SPEEDUP_FACTOR = 0.95;
 export const FEED_COUNTDOWN_FROM = 3;
 
 // ---------------------------------------------------------------------------
+// Player Serve (spec P2-f2): the automatic toss and the Serve's plan
+// ---------------------------------------------------------------------------
+
+/** The toss appears this far behind the player's end line, metres ... */
+export const TOSS_BEHIND_END_M = 0.1;
+/** ... this far to the hitting-hand side of the centre line (|x|), metres ... */
+export const TOSS_SIDE_M = 0.3;
+/** ... and this high above the table top, metres. */
+export const TOSS_START_HEIGHT_M = 0.1;
+/** How high the toss rises (about: drag takes a few centimetres off), metres. */
+export const TOSS_RISE_M = 0.4;
+/**
+ * The toss's Ideal Time is when the falling ball passes this high above the
+ * table top, metres, and the Serve is struck from there however late the
+ * Swing is seen. Lower than about 0.15 m almost no Serve can both bounce on
+ * the player's half and clear the net.
+ */
+export const TOSS_STRIKE_HEIGHT_M = 0.25;
+/**
+ * A player Serve's first bounce (on the player's half, on the line from the
+ * strike to the target) is this far from the net for its shortest targets
+ * (SERVE_SHORT_DEPTH_M past the net or less) ...
+ */
+export const SERVE_BOUNCE1_Z_SHORT = 0.9;
+/** ... and this far for its deepest (SERVE_DEEP_DEPTH_M or more), in a straight line between. */
+export const SERVE_BOUNCE1_Z_DEEP = 0.72;
+/**
+ * Target depths (past the net) the first bounce is anchored at. Struck from
+ * TOSS_STRIKE_HEIGHT_M, a short Serve needs a first bounce near the player's
+ * end (a steep bounce, high enough to clear the net yet drop short), a deep
+ * one a first bounce nearer the net; with these, nearly every in-window
+ * Serve has a solution.
+ */
+export const SERVE_SHORT_DEPTH_M = 0.5;
+export const SERVE_DEEP_DEPTH_M = 1.3;
+/** First guess at a player Serve's flight time to its first bounce, simulated s (the solver finds the real one). */
+export const SERVE_FIRST_FLIGHT_S = 0.2;
+
+// ---------------------------------------------------------------------------
 // Physics (fixed facts; tuning guesses are knobs below)
 // ---------------------------------------------------------------------------
 

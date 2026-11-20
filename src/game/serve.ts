@@ -14,12 +14,31 @@
  * `judgeServe` simulates a launched Serve and calls it under the referee's
  * Serve rules (`rally.ts`), so the rules live in one place.
  *
+ * The player serves from an automatic toss (spec P2-f2): `launchToss` puts
+ * the ball up behind the player's end, and `findTossIdealTime` says when the
+ * falling ball reaches the strike height: the toss's Ideal Time, which the
+ * shot resolver judges the Swing against like any other.
+ *
  * Pure and headless: no randomness, the same integrator as the live ball.
  */
 
+import type { Hand } from '../sensing/landmarks.ts';
 import { launchBall, simulate, type BallEvent, type BallState, type Vec3 } from './ball.ts';
-import { BALL_RADIUS, NET_HEIGHT, OPPONENT_END_Z, TABLE_TOP_Y } from './constants.ts';
-import { createReferee } from './rally.ts';
+import {
+  BALL_RADIUS,
+  GRAVITY,
+  NET_HEIGHT,
+  OPPONENT_END_Z,
+  PHYSICS_DT,
+  PLAYER_END_Z,
+  TABLE_TOP_Y,
+  TOSS_BEHIND_END_M,
+  TOSS_RISE_M,
+  TOSS_SIDE_M,
+  TOSS_START_HEIGHT_M,
+  TOSS_STRIKE_HEIGHT_M,
+} from './constants.ts';
+import { createReferee, type IdealTime } from './rally.ts';
 import type { Side } from './side.ts';
 import { solveShot, type ShotSolution, type ShotSolver, type TablePoint } from './solver.ts';
 
@@ -218,6 +237,48 @@ export function judgeServe(ball: BallState, server: Side): ServeResult {
     },
   });
   return referee.serveResult ?? 'fault';
+}
+
+/**
+ * The player's automatic toss: the ball appears TOSS_BEHIND_END_M behind the
+ * player's end line, TOSS_SIDE_M to the hitting-hand side (world +x is the
+ * player's right) and TOSS_START_HEIGHT_M above the table, and goes straight
+ * up about TOSS_RISE_M (the launch speed ignores drag, which takes a few
+ * centimetres off). No Spin.
+ */
+export function launchToss(hand: Hand): BallState {
+  const x = (hand === 'left' ? -1 : 1) * TOSS_SIDE_M;
+  const from = { x, y: TABLE_TOP_Y + TOSS_START_HEIGHT_M, z: PLAYER_END_Z + TOSS_BEHIND_END_M };
+  return launchBall(from, { x: 0, y: Math.sqrt(2 * -GRAVITY * TOSS_RISE_M), z: 0 });
+}
+
+/** Longest look-ahead for a toss, simulated s: it is back down well inside this. */
+const TOSS_HORIZON_S = 2;
+
+/**
+ * The toss's Ideal Time: when the falling ball's centre passes
+ * TOSS_STRIKE_HEIGHT_M above the table top, interpolated within its substep,
+ * and the ball there (the strike: position exactly the Ideal Time's, velocity
+ * the substep's end). Null if it never comes down through that height.
+ */
+export function findTossIdealTime(toss: BallState): { ideal: IdealTime; strike: BallState } | null {
+  const strikeY = TABLE_TOP_Y + TOSS_STRIKE_HEIGHT_M;
+  let previous = toss;
+  let found: { ideal: IdealTime; strike: BallState } | null = null;
+  simulate(toss, {
+    maxTime: TOSS_HORIZON_S,
+    until: (state, time) => {
+      const a = previous.position;
+      const b = state.position;
+      previous = state;
+      if (!(state.velocity.y < 0 && a.y >= strikeY && b.y < strikeY)) return false;
+      const f = (a.y - strikeY) / (a.y - b.y);
+      const position = { x: a.x + (b.x - a.x) * f, y: strikeY, z: a.z + (b.z - a.z) * f };
+      found = { ideal: { simSeconds: time - (1 - f) * PHYSICS_DT, position }, strike: { ...state, position: { ...position } } };
+      return true;
+    },
+  });
+  return found;
 }
 
 function sub(a: TablePoint, b: TablePoint): TablePoint {

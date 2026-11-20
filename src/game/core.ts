@@ -5,14 +5,16 @@
  * the caller feeds in frames and Swings, and listens for Shot and bounce events.
  *
  * Two modes. Return Drill (the default): the Feeder sends Feeds and the
- * player returns each one. Match (specs P2-b, P2-f1): a scored Match
- * (`match.ts`) against the Opponent. Each Rally starts with a Serve after a
- * pause and the "3, 2, 1" cue; the Opponent returns the player's Returns,
- * and a referee (`rally.ts`) calls the Serve (legal, Fault or Let) and the
- * Rally End, which awards the Point. Every Shot heading to either side is
- * looked ahead to its Ideal Time; a Shot toward the Opponent asks it for its
- * Shot at launch (ADR 0002), and the Opponent strikes at the Ideal Time. The
- * Streak is Return Drill's only.
+ * player returns each one. Match (specs P2-b, P2-f1, P2-f2): a scored Match
+ * (`match.ts`) against the Opponent. Each Rally starts with a Serve by the
+ * Match's server after a pause and the "3, 2, 1" cue: the Opponent's at
+ * once, the player's from an automatic toss they swing at (a missed toss
+ * drops, and the cue and toss start over, with no Point). The Opponent
+ * returns the player's Returns, and a referee (`rally.ts`) calls the Serve
+ * (legal, Fault or Let) and the Rally End, which awards the Point. Every
+ * Shot heading to either side is looked ahead to its Ideal Time; a Shot
+ * toward the Opponent asks it for its Shot at launch (ADR 0002), and the
+ * Opponent strikes at the Ideal Time. The Streak is Return Drill's only.
  *
  * Each frame: advance the simulation in fixed PHYSICS_DT substeps (slowed by
  * TIME_SCALE), report this frame's table bounces, let the referee judge them
@@ -23,9 +25,10 @@
  *
  * Every random draw comes from the injected `random`, in a fixed order (the
  * Feeder's draws at each launch, the resolver's at each accepted Swing and
- * contact; in a Match also the first server when the core is made, the
- * Opponent's Serve and its seed at each Serve, the Opponent's draws when a
- * Shot toward it launches, and each of its Shots' seed at the strike), so the
+ * contact, the same for a Swing at the toss and the player's Serve; in a
+ * Match also the first server when the core is made, the Opponent's Serve
+ * and its seed at each of its Serves, the Opponent's draws when a Shot
+ * toward it launches, and each of its Shots' seed at the strike), so the
  * same seed and the same Swings replay the same session.
  */
 
@@ -48,7 +51,7 @@ import { createListeners } from './listeners.ts';
 import { awardPoint, cancelRally, newMatch, nextGame, startRally, type MatchConfig, type MatchState } from './match.ts';
 import { createReferee, lookAhead, type Incoming, type Opponent, type RallyEnd, type RallyEndCall, type RallyEvent } from './rally.ts';
 import { createScore, type StreakState } from './score.ts';
-import { OPPONENT_SERVE_FROM, solveServe } from './serve.ts';
+import { findTossIdealTime, launchToss, OPPONENT_SERVE_FROM, solveServe } from './serve.ts';
 import { contactPoint, createShotResolver, feedResult, solveReturn, type ResolverParams, type ShotEvent } from './shotResolver.ts';
 import { otherSide, type Side } from './side.ts';
 import { createSimClock, simSecondsToRealMs } from './simClock.ts';
@@ -79,7 +82,7 @@ export interface GameCoreOptions {
   opponent?: Opponent;
   /** The Match's length: one Game to 11 (DEFAULT_MATCH_CONFIG) unless told otherwise. Match mode only. */
   match?: MatchConfig;
-  /** The Serve solver; `solveServe` unless a test stands one in. */
+  /** The Serve solver for both sides' Serves; `solveServe` unless a test stands one in. */
   solveServe?: typeof solveServe;
 }
 
@@ -129,11 +132,18 @@ export interface GameCore {
   readonly streak: StreakState;
   /**
    * The Match score and phase (read-only: a new object after each change);
-   * null in Return Drill. The first server is drawn from `random`. Until the
-   * player Serve lands (P2-f2), the Opponent serves every Rally, even when
-   * `server` is the player.
+   * null in Return Drill. The first server is drawn from `random`, and each
+   * Rally's Serve is by `server`. The phase stays `pre-serve` through the
+   * player's toss, until the Serve is struck.
    */
   readonly match: Readonly<MatchState> | null;
+  /**
+   * In a Match, the player's Serve toss while it is up (from the end of the
+   * "3, 2, 1" until the Serve is struck or the toss is missed), as the
+   * Incoming the player swings at: `ball` is the toss, `ideal` and `strike`
+   * the falling ball at the strike height. Null otherwise.
+   */
+  readonly toss: Incoming | null;
   /** 3, 2 or 1 while the "3, 2, 1" cue before a Feed (Return Drill) or a Serve (Match) is showing, else null. */
   readonly countdown: number | null;
   /**
@@ -175,7 +185,10 @@ export interface GameCore {
   /**
    * Each Shot that will reach its receiver's end (it has an Ideal Time), as
    * it launches: every Feed and, in a Match, every Shot by either side that
-   * first lands on the other half. Returns an unsubscribe function.
+   * first lands on the other half; and each of the player's Serve tosses,
+   * as it goes up (`core.toss` is already that Incoming), so whoever swings
+   * at Shots coming to the player swings at the toss the same way. Returns
+   * an unsubscribe function.
    */
   onIncoming(listener: (incoming: Incoming) => void): () => void;
 }
@@ -207,15 +220,18 @@ export function createGameCore(options: GameCoreOptions): GameCore {
   let opponentPlan: OpponentPlan | null = null;
   /** The Match score; the first server is the Match's first draw from `random`. Null in Return Drill. */
   let match: MatchState | null = mode === 'match' ? newMatch(matchConfig, random() < 0.5 ? 'player' : 'opponent') : null;
+  /** The player's Serve toss while it is up; null otherwise. */
+  let toss: Incoming | null = null;
   /**
    * In a Match, the time between Rallies, like the Feeder's: `serving` while
-   * a Rally is on or its ball plays out; then `waiting` FEED_PAUSE_S (plus
-   * GAME_BREAK_S after a Game); then the "3, 2, 1" `countdown`; then the
-   * Serve. Real seconds, in the current phase.
+   * a Rally is on or its ball plays out (or a missed toss drops); then
+   * `waiting` FEED_PAUSE_S (plus GAME_BREAK_S after a Game); then the "3, 2,
+   * 1" `countdown`; then the Serve, or for the player the `toss` until they
+   * serve or miss it. Real seconds, in the current phase.
    */
-  let serveClock: { phase: 'waiting' | 'countdown' | 'serving'; seconds: number } = { phase: 'waiting', seconds: 0 };
+  let serveClock: { phase: 'waiting' | 'countdown' | 'toss' | 'serving'; seconds: number } = { phase: 'waiting', seconds: 0 };
   const feeder = createFeeder({ random });
-  const resolver = createShotResolver({ params: options.resolverParams, hand: options.hand, random });
+  const resolver = createShotResolver({ params: options.resolverParams, hand: options.hand, random, solveServe: serveSolver });
   const score = createScore();
   const shotEvents = createListeners<ShotEvent>();
   const bounces = createListeners<BounceEvent>();
@@ -283,13 +299,15 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     return incoming;
   }
 
-  /**
-   * Start a Rally with a Serve. Until the player Serve lands (P2-f2), the
-   * Opponent serves every Rally, whoever `match.server` is. Its Serve is
-   * solved as the brain checked it; if it somehow can't be, it is served
-   * best effort, and the referee calls whatever it does.
-   */
+  /** The "3, 2, 1" is over: the Match's server serves (the player from a toss). */
   function serve(nowMs: number): void {
+    if (!match) return;
+    if (match.server === 'player') tossUp(nowMs);
+    else opponentServe(nowMs);
+  }
+
+  /** A Serve by `by` is about to launch: the Rally starts. */
+  function startServe(by: Side): void {
     if (!match) return;
     serveClock = { phase: 'serving', seconds: 0 };
     match = startRally(match);
@@ -297,13 +315,60 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     rallyOn = true;
     shotIndex = 0;
     opponentPlan = null;
-    server = 'opponent';
+    server = by;
+  }
+
+  /**
+   * Start a Rally with the Opponent's Serve. It is solved as the brain checked
+   * it; if it somehow can't be, it is served best effort, and the referee
+   * calls whatever it does.
+   */
+  function opponentServe(nowMs: number): void {
+    startServe('opponent');
     const intent = opponent.chooseServe(random);
     const solution = serveSolver(OPPONENT_SERVE_FROM, intent) ?? serveSolver(OPPONENT_SERVE_FROM, intent, solveShot, { bestEffort: true });
     const seed = Math.floor(random() * 2 ** 32);
     ball = launchBall(OPPONENT_SERVE_FROM, solution.velocity, solution.spin, seed);
     const incoming = launched(server, ball, nowMs, true);
     resolver.startIncoming({ idealAtMs: incoming?.idealAtMs ?? null, topspin: intent.topspin });
+  }
+
+  /**
+   * The player's Serve turn: the toss goes up as the ball in play, and the
+   * resolver judges a Swing at it against its Ideal Time. The Rally doesn't
+   * start (the Match stays `pre-serve`) until the Serve is struck.
+   */
+  function tossUp(nowMs: number): void {
+    serveClock = { phase: 'toss', seconds: 0 };
+    opponentPlan = null;
+    ball = launchToss(options.hand());
+    const ahead = findTossIdealTime(ball);
+    if (!ahead) throw new Error('The toss never falls through the strike height: check the TOSS_* constants');
+    toss = {
+      receiver: 'player',
+      ball,
+      launchedAtMs: nowMs,
+      ideal: ahead.ideal,
+      idealAtMs: nowMs + simSecondsToRealMs(ahead.ideal.simSeconds, TIME_SCALE.value),
+      strike: ahead.strike,
+      shotIndex: 0,
+    };
+    resolver.startToss({ idealAtMs: toss.idealAtMs, strike: ahead.strike.position });
+    incomings.emit(toss);
+  }
+
+  /** The player struck their Serve off the toss (the resolver's contact): the Rally starts, and the Opponent decides its Shot. */
+  function playerServe(contact: Extract<ShotEvent, { type: 'contact' }>): void {
+    toss = null;
+    startServe('player');
+    const incoming = launched('player', contact.ball, contact.atMs, true);
+    if (incoming) opponentPlan = { incoming, choice: opponent.chooseShot(incoming, random) };
+  }
+
+  /** The player missed the toss (no Swing, or one outside the Hit Window): it drops, then the cue and toss start over. No Fault, no Point. */
+  function tossMissed(): void {
+    toss = null;
+    serveClock = { phase: 'serving', seconds: 0 };
   }
 
   /**
@@ -314,7 +379,7 @@ export function createGameCore(options: GameCoreOptions): GameCore {
    * next Game (`nextGame`) before the cue. After the Match, it never serves.
    */
   function updateServeClock(realSeconds: number, nowMs: number): void {
-    if (!match) return;
+    if (!match || serveClock.phase === 'toss') return;
     if (serveClock.phase === 'serving') {
       if (rallyOn || !ballIsDone(ball)) return;
       serveClock = { phase: 'waiting', seconds: 0 };
@@ -339,13 +404,16 @@ export function createGameCore(options: GameCoreOptions): GameCore {
       const result = feedResult(event);
       if (result === 'returned') score.addReturn();
       else if (result === 'failed') score.breakStreak();
+    } else if (toss) {
+      if (event.type === 'contact') playerServe(event);
+      else if (chancePassed(event)) tossMissed();
     } else if (rallyOn) {
       if (event.type === 'contact') {
         // The player's Return: the Opponent decides its Shot as it launches (ADR 0002).
         shotIndex++;
         const incoming = launched('player', event.ball, event.atMs);
         if (incoming) opponentPlan = { incoming, choice: opponent.chooseShot(incoming, random) };
-      } else if (event.type === 'miss' || event.type === 'late' || (event.type === 'early' && event.final)) {
+      } else if (chancePassed(event)) {
         // The player's chance has passed: nothing launches, the ball flies on.
         endRally(referee.noReturn(), nowMs);
       }
@@ -392,6 +460,9 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     },
     get match() {
       return match;
+    },
+    get toss() {
+      return toss;
     },
     get countdown() {
       if (mode === 'drill') return feeder.countdown;
@@ -443,8 +514,9 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     setPaused(next) {
       paused = next;
       feeder.setPaused(next);
-      // Between Rallies, the wait and any "3, 2, 1" start over.
-      if (next && serveClock.phase !== 'serving') serveClock = { phase: 'waiting', seconds: 0 };
+      // Between Rallies, the wait and any "3, 2, 1" start over. A toss already
+      // up plays out: Swings are ignored, so it is missed and starts over.
+      if (next && (serveClock.phase === 'waiting' || serveClock.phase === 'countdown')) serveClock = { phase: 'waiting', seconds: 0 };
     },
 
     setBall(next) {
@@ -457,6 +529,11 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     onMatch: matchEvents.subscribe,
     onIncoming: incomings.subscribe,
   };
+}
+
+/** The player's chance at the Shot (or toss) has passed with nothing struck: a Miss, a Late Swing, or an Early one that used the try. */
+function chancePassed(event: ShotEvent): boolean {
+  return event.type === 'miss' || event.type === 'late' || (event.type === 'early' && event.final);
 }
 
 /** Below this speed (m/s), on the table, a live ball has come to rest. */
@@ -484,7 +561,7 @@ export function describeMatchEvent(e: MatchEvent): string {
   const s = e.match;
   const score = `You ${s.points.player} – ${s.points.opponent} Opponent`;
   const games = s.games.player + s.games.opponent > 0 ? ` (Games ${s.games.player} – ${s.games.opponent})` : '';
-  const serving = `${WHO[s.server]} to serve (${s.servesLeft} left)${s.server === 'player' ? '; the Opponent serves for you for now' : ''}`;
+  const serving = `${WHO[s.server]} to serve (${s.servesLeft} left)`;
   if (e.type === 'let') return `Let: serve again. ${score}${games}`;
   if (e.type === 'next-game') return `Next Game. ${score}${games}, ${serving}`;
   const why = `${WHO[otherSide(e.to)]}: ${END_TEXT[e.end]}`;

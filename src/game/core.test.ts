@@ -20,7 +20,8 @@ import type { MatchConfig } from './match.ts';
 import type { Incoming, Opponent, RallyEvent } from './rally.ts';
 import { judgeServe, OPPONENT_SERVE_FROM, solveServe } from './serve.ts';
 import { feedResult, knobResolverParams, type ShotEvent } from './shotResolver.ts';
-import { otherSide } from './side.ts';
+import { otherSide, type Side } from './side.ts';
+import type { Hand } from '../sensing/landmarks.ts';
 import { solveShot, type ShotSolution } from './solver.ts';
 
 const FRAME_S = 1 / 60;
@@ -182,8 +183,26 @@ describe('GameCore: pause, Swings and the ball', () => {
 // Match (spec P2-b): Rallies against the Opponent
 // ---------------------------------------------------------------------------
 
-function newMatchCore(seed: number, opponent?: Opponent, extra: { match?: MatchConfig; solveServe?: typeof solveServe } = {}): GameCore {
-  return createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: () => 'right', mode: 'match', opponent, ...extra });
+/**
+ * A Match core. The Match's first server is its first draw from `random`
+ * (`random() < 0.5` is the player): `firstServer` fixes it by standing in for
+ * that one draw, or `drawn` leaves it to the seed. The Opponent serves first
+ * unless told otherwise.
+ */
+function newMatchCore(
+  seed: number,
+  opponent?: Opponent,
+  extra: { match?: MatchConfig; solveServe?: typeof solveServe; firstServer?: Side | 'drawn'; hand?: Hand } = {},
+): GameCore {
+  const { firstServer = 'opponent', hand = 'right', ...rest } = extra;
+  const rng = makeRng(seed);
+  let drawn = firstServer === 'drawn';
+  const random = () => {
+    if (drawn) return rng();
+    drawn = true;
+    return firstServer === 'player' ? 0.25 : 0.75;
+  };
+  return createGameCore({ random, resolverParams: knobResolverParams, hand: () => hand, mode: 'match', opponent, ...rest });
 }
 
 /**
@@ -383,7 +402,7 @@ const serves = (run: MatchRun) => run.rally.filter((e) => e.type === 'serve');
 
 describe('GameCore: a scored Match', () => {
   it('holds a MatchState in a Match, its first server drawn from random; none in Return Drill', () => {
-    const first = (seed: number) => newMatchCore(seed).match!;
+    const first = (seed: number) => newMatchCore(seed, undefined, { firstServer: 'drawn' }).match!;
     expect(first(1)).toMatchObject({ points: { player: 0, opponent: 0 }, games: { player: 0, opponent: 0 }, servesLeft: 2, phase: 'pre-serve' });
     const servers = new Set(Array.from({ length: 20 }, (_, i) => first(i).server));
     expect(servers).toEqual(new Set(['player', 'opponent']));
@@ -437,7 +456,9 @@ describe('GameCore: a scored Match', () => {
     expect(core.match).toEqual(last);
     expect(last.points.player + last.points.opponent).toBe(6);
     expect(last.points.player).toBe(points(run).filter((p) => p.to === 'player').length);
-    expect(opponent.serves).toBe(6);
+    // The Serve passes every 2 Points: the Opponent served Points 1, 2, 5 and 6, the player (off the toss) 3 and 4.
+    expect(opponent.serves).toBe(4);
+    expect(serves(run).map((e) => e.type === 'serve' && e.by)).toEqual(['opponent', 'opponent', 'player', 'player', 'opponent', 'opponent']);
     expect(serves(run).every((e) => e.type === 'serve' && e.result === 'legal')).toBe(true);
     expect(describeMatchEvent(points(run)[0]!)).toMatch(/^Point to (you|Opponent) \(.*\)\. You \d+ – \d+ Opponent, (you|Opponent) to serve \(\d left\)/);
   });
@@ -486,8 +507,8 @@ describe('GameCore: a scored Match', () => {
   it('after a Game, waits GAME_BREAK_S more and starts the next; after the Match, never serves again', () => {
     const core = newMatchCore(16, undefined, { match: { pointsToWin: 2, winBy: 1, bestOf: 3 } });
     const firstServer = core.match!.server;
-    // The player never swings: the Opponent wins every Point, 2–0, 2–0.
-    const run = runMatch(core, () => null, () => false, 120);
+    // The player serves off its tosses but never returns: the Opponent wins every Point, 2–0, 2–0.
+    const run = runMatch(core, scriptedMatchPlayer(core, (i) => i === core.toss), () => false, 120);
     const kinds = run.match.map((e) => e.type);
     expect(kinds).toEqual(['point', 'point', 'next-game', 'point', 'point']);
     const [, gamePoint, next] = run.match;
@@ -511,5 +532,147 @@ describe('GameCore: a scored Match', () => {
     const first = play(21);
     expect(first.match.at(-1)!.match.phase).toBe('match-over');
     expect(play(21)).toEqual(first);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The player's Serve (spec P2-f2): an automatic toss, then the Serve rotation
+// ---------------------------------------------------------------------------
+
+describe("GameCore: the player's Serve", () => {
+  it('tosses after the pause and "3, 2, 1"; a Swing at its Ideal Time serves, legal, and the Rally starts', () => {
+    const opponent = countingOpponent();
+    const core = newMatchCore(31, opponent, { firstServer: 'player' });
+    const countdowns: number[] = [];
+    const tosses: Incoming[] = [];
+    core.onIncoming((i) => {
+      if (i === core.toss) {
+        tosses.push(i);
+        // Up as the ball in play, before the Rally starts.
+        expect(core.ball).toBe(i.ball);
+        expect(core.match!.phase).toBe('pre-serve');
+        expect(core.countdown).toBeNull();
+      }
+    });
+    const nextSwing = scriptedMatchPlayer(core, (i) => i === core.toss);
+    const run = runMatch(
+      core,
+      (nowMs) => {
+        const c = core.countdown;
+        if (c !== null && countdowns.at(-1) !== c) countdowns.push(c);
+        return nextSwing(nowMs);
+      },
+      (r) => serves(r).length >= 1,
+      20,
+    );
+    expect(countdowns).toEqual([3, 2, 1]);
+    expect(tosses).toHaveLength(1);
+    const toss = tosses[0]!;
+    expect(toss).toMatchObject({ receiver: 'player', shotIndex: 0 });
+    expect(toss.launchedAtMs - START_MS).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
+    expect(toss.ball.position).toEqual({ x: 0.3, y: TABLE_TOP_Y + 0.1, z: PLAYER_END_Z + 0.1 });
+    expect(toss.ideal.position.y).toBeCloseTo(TABLE_TOP_Y + 0.25, 6);
+    expect(core.toss).toBeNull();
+    // Struck on the first frame at the toss's Ideal Time, from its strike point.
+    const contact = run.shots.find((e) => e.type === 'contact');
+    if (contact?.type !== 'contact') throw new Error('expected a contact');
+    expect(contact.position).toEqual(toss.ideal.position);
+    expect(contact.atMs - toss.idealAtMs).toBeGreaterThanOrEqual(0);
+    expect(contact.atMs - toss.idealAtMs).toBeLessThan(1000 * FRAME_S);
+    expect(run.rally.slice(0, 4).map((e) => (e.type === 'shot' ? `${e.by}:${e.shotIndex}` : e.type === 'bounce' ? e.half : e.type === 'serve' ? `${e.by}:${e.result}` : e.type))).toEqual([
+      'player:0',
+      'player',
+      'opponent',
+      'player:legal',
+    ]);
+    expect(core.match!.phase).toBe('rally');
+    expect(core.opponentPlan?.incoming).toMatchObject({ receiver: 'opponent', shotIndex: 0 });
+    expect(opponent.serves).toBe(0);
+  });
+
+  it('tosses on the hitting-hand side: x < 0 for a left-hander', () => {
+    const core = newMatchCore(32, undefined, { firstServer: 'player', hand: 'left' });
+    runMatch(core, () => null, () => core.toss !== null, 20);
+    expect(core.toss!.ball.position.x).toBeCloseTo(-0.3, 9);
+  });
+
+  it.each([
+    ['no Swing', null],
+    ['an Early Swing', -1],
+    ['a Late Swing', 1],
+  ] as const)('a toss missed with %s drops, and is tossed again after the pause and "3, 2, 1": no Fault, no Point', (_name, side) => {
+    const core = newMatchCore(33, undefined, { firstServer: 'player' });
+    const tosses: Incoming[] = [];
+    core.onIncoming((i) => i === core.toss && tosses.push(i));
+    const pending: { swing: SwingEvent | null } = { swing: null };
+    core.onIncoming((i) => {
+      if (i !== core.toss || side === null || tosses.length > 1) return;
+      const outside = side * (knobResolverParams().hitWindowMs + 50);
+      pending.swing = { t: i.idealAtMs + TIMING_OFFSET_MS.value + outside, peakSpeed: SWING_FAST.value, side: 'forehand', vertPath: 0 };
+    });
+    const shots: { atMs: number; event: ShotEvent }[] = [];
+    let nowMs = START_MS;
+    core.onShot((event) => shots.push({ atMs: nowMs, event }));
+    const rally: RallyEvent[] = [];
+    const match: MatchEvent[] = [];
+    core.onRally((e) => rally.push(e));
+    core.onMatch((e) => match.push(e));
+    for (let i = 0; i < 20 / FRAME_S && tosses.length < 2; i++) {
+      nowMs += 1000 * FRAME_S;
+      if (pending.swing && nowMs >= pending.swing.t) {
+        core.swing(pending.swing, nowMs);
+        pending.swing = null;
+      }
+      core.frame({ nowMs, elapsedSeconds: FRAME_S });
+    }
+    expect(shots.map((s) => s.event.type)).toEqual([side === null ? 'miss' : side < 0 ? 'early' : 'late']);
+    expect(tosses).toHaveLength(2);
+    expect(tosses[1]!.launchedAtMs - shots[0]!.atMs).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
+    expect(rally).toEqual([]);
+    expect(match).toEqual([]);
+    expect(core.match).toMatchObject({ points: { player: 0, opponent: 0 }, phase: 'pre-serve', server: 'player', servesLeft: 2 });
+  });
+
+  it('lets a toss that is up when the game pauses play out as missed, and tosses again only once resumed', () => {
+    const core = newMatchCore(34, undefined, { firstServer: 'player' });
+    let tosses = 0;
+    core.onIncoming((i) => i === core.toss && tosses++);
+    let nowMs = START_MS;
+    const step = () => core.frame({ nowMs: (nowMs += 1000 * FRAME_S), elapsedSeconds: FRAME_S });
+    while (!core.toss) step();
+    const toss = core.toss!;
+    core.setPaused(true);
+    expect(core.toss).toBe(toss);
+    core.swing({ t: toss.idealAtMs + TIMING_OFFSET_MS.value, peakSpeed: SWING_FAST.value, side: 'forehand', vertPath: 0 }, toss.idealAtMs);
+    for (let i = 0; i < 600; i++) step();
+    expect(core.toss).toBeNull();
+    expect(tosses).toBe(1);
+    expect(core.match).toMatchObject({ points: { player: 0, opponent: 0 }, phase: 'pre-serve' });
+    core.setPaused(false);
+    const resumedAt = nowMs;
+    while (tosses === 1) step();
+    expect(nowMs - resumedAt).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
+  });
+
+  it('serves in the Match\'s order for a whole Game through a deuce: every 2 Points, then every Point from 10–10', () => {
+    // Who wins each Point: alternately to 10–10, 11–11 and 12–12, then the player twice: 14–12.
+    const winners: Side[] = [...Array.from({ length: 24 }, (_, i): Side => (i % 2 === 0 ? 'player' : 'opponent')), 'player', 'player'];
+    let core: GameCore | null = null;
+    const pointWinner = () => winners[core!.match!.points.player + core!.match!.points.opponent]!;
+    // The Opponent Whiffs the Points the player is to win; the player lets the others go by, but always serves off its toss.
+    const scripted = createScriptedOpponent();
+    const opponent: Opponent = { ...scripted, chooseShot: (i, random) => (pointWinner() === 'player' ? 'whiff' : scripted.chooseShot(i, random)) };
+    core = newMatchCore(35, opponent, { firstServer: 'player' });
+    const run = runMatch(core, scriptedMatchPlayer(core, (i) => i === core!.toss || pointWinner() === 'player'), (r) => r.core.match!.phase === 'match-over', 600);
+
+    expect(core.match).toMatchObject({ phase: 'match-over', winner: 'player', points: { player: 14, opponent: 12 } });
+    expect(points(run).map((p) => p.to)).toEqual(winners);
+    expect(points(run).some((p) => p.end === 'fault')).toBe(false);
+    // Before 10–10 the Serve passes every 2 Points; from 10–10, every Point. The player served first.
+    const expected = winners.map((_, n): Side => ((n < 20 ? Math.floor(n / 2) : n) % 2 === 0 ? 'player' : 'opponent'));
+    expect(serves(run).map((e) => e.type === 'serve' && e.by)).toEqual(expected);
+    expect(serves(run).every((e) => e.type === 'serve' && e.result === 'legal')).toBe(true);
+    // Each Rally's first Shot is the server's.
+    expect(rallyShots(run).filter((e) => e.shotIndex === 0).map((e) => e.by)).toEqual(expected);
   });
 });

@@ -3,6 +3,11 @@
  * from Swing timing alone whether an incoming Shot (a Feed, or in a Match the
  * Opponent's Shot) is returned, and where the Return goes. The game never
  * checks whether the Paddle touches the ball.
+ *
+ * The player's Serve (spec P2-f2) is judged the same way against its toss's
+ * Ideal Time (`startToss`): a Swing in the Hit Window serves, planned by the
+ * same timing, speed and Lift rules as a Return (`planServe`), so a badly
+ * timed or over-hit Serve Faults only because its target moves long or wide.
  */
 
 import type { SwingEvent } from '../input/types.ts';
@@ -24,6 +29,11 @@ import {
   RETURN_SAFE_FRACTION,
   RETURN_SCATTER_M,
   RETURN_TOPSPIN_MAX_REVS,
+  SERVE_BOUNCE1_Z_DEEP,
+  SERVE_BOUNCE1_Z_SHORT,
+  SERVE_DEEP_DEPTH_M,
+  SERVE_FIRST_FLIGHT_S,
+  SERVE_SHORT_DEPTH_M,
   SPIN_ANSWER_FULL_REVS,
   SPIN_ANSWER_M,
   SWING_FAST,
@@ -34,6 +44,7 @@ import {
 } from './constants.ts';
 import { revsToRadPerSec } from '../physics/spin.ts';
 import { judgeReturnFlight, type ReturnFlightResult } from './score.ts';
+import { solveServe, type ServeIntent } from './serve.ts';
 import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type TablePoint } from './solver.ts';
 
 /** Live tuning values, read on every use (knobs in the game). */
@@ -146,6 +157,57 @@ export function planReturn(input: ReturnInput, params: ResolverParams, random: (
   return { target: { x: targetX, z: -finalDepth }, flightTime, quality, lift, topspin };
 }
 
+/** What a Serve is planned from: an accepted Swing at the toss, its timing and the player's hand. */
+export type ServeInput = Omit<ReturnInput, 'incomingTopspin'>;
+
+/**
+ * Where a Serve is aimed. Its target, pace, quality, Lift and Topspin are
+ * planned exactly as a Return's (with no incoming spin to answer); its
+ * `flightTime` is only the first guess at the first segment's.
+ */
+export interface ServePlan extends ReturnPlan {
+  /** Its first bounce, on the player's own half, on the line from the strike to the target. */
+  bounce1: TablePoint;
+}
+
+/**
+ * Plan the player's Serve struck from `from` (spec P2-f2): the target on the
+ * Opponent's half by the same rules as a Return (`planReturn`, with the same
+ * random draws), so timing picks the direction, speed the depth, Lift the
+ * Topspin, and a Swing late or early in the window, or a fast one, moves the
+ * target long (ADR 0001). The first bounce is on the line from the strike to
+ * the target, SERVE_BOUNCE1_Z_SHORT from the net for a short target down to
+ * SERVE_BOUNCE1_Z_DEEP for a deep one, where a Serve from the toss can be
+ * solved.
+ */
+export function planServe(input: ServeInput, from: TablePoint, params: ResolverParams, random: () => number): ServePlan {
+  const plan = planReturn({ ...input, incomingTopspin: 0 }, params, random);
+  const { target } = plan;
+  const deep = clamp01((-target.z - SERVE_SHORT_DEPTH_M) / (SERVE_DEEP_DEPTH_M - SERVE_SHORT_DEPTH_M));
+  const z = lerp(SERVE_BOUNCE1_Z_SHORT, SERVE_BOUNCE1_Z_DEEP, deep);
+  const along = (z - from.z) / (target.z - from.z);
+  return { ...plan, bounce1: { x: from.x + (target.x - from.x) * along, z }, flightTime: SERVE_FIRST_FLIGHT_S };
+}
+
+/** The ServeIntent of a planned Serve: no Sidespin (out of scope). */
+export function serveIntentOf(plan: ServePlan): ServeIntent {
+  return { bounce1: { ...plan.bounce1 }, target: { ...plan.target }, flightTime: plan.flightTime, topspin: plan.topspin, sidespin: 0 };
+}
+
+/**
+ * Solve a planned Serve like `solveReturn` solves a Return: its target never
+ * moves because the solver failed (ADR 0001), so a Serve planned long stays
+ * long and Faults. If the intent can't be solved, it is tried again with no
+ * spin (when it had any), then solved best effort with no spin.
+ */
+export function solvePlannedServe(solve: typeof solveServe, from: Vec3, intent: ServeIntent): ShotSolution {
+  const solved = solve(from, intent);
+  if (solved) return solved;
+  const flat = { ...intent, topspin: 0, sidespin: 0 };
+  const hasSpin = intent.topspin !== 0 || intent.sidespin !== 0;
+  return (hasSpin ? solve(from, flat) : null) ?? solve(from, flat, solveShot, { bestEffort: true });
+}
+
 /**
  * Answer an incoming Shot's spin by moving a Return's depth past the net (ADR 0001: only the
  * target moves). With `s` its Topspin as a share of `spinAnswerFullRevs`, in [−1, 1]: against Backspin, depth
@@ -227,27 +289,31 @@ export type ShotEvent =
   | { readonly type: 'late'; readonly delta: number }
   /** No Swing by the end of the Late grace after the Hit Window. */
   | { readonly type: 'miss' }
-  /** A Swing in the Hit Window: the Feed will be returned at `contactAtMs`. */
+  /**
+   * A Swing in the Hit Window: the Feed will be returned (or, at a toss, the
+   * Serve struck) at `contactAtMs`.
+   */
   | {
       readonly type: 'accepted';
       readonly swing: SwingEvent;
       readonly delta: number;
       /** When contact will happen: max(now, Ideal Time), performance.now() clock. */
       readonly contactAtMs: number;
-      readonly plan: ReturnPlan;
+      /** A Return's plan, or at a toss a ServePlan. */
+      readonly plan: ReturnPlan | ServePlan;
     }
-  /** Contact: the Return was launched (the game makes `ball` the ball in play). */
+  /** Contact: the Return (or Serve) was launched (the game makes `ball` the ball in play). */
   | {
       readonly type: 'contact';
       /** performance.now() of the launch (the frame at or just after the planned contact). */
       readonly atMs: number;
-      /** Where the ball was struck. */
+      /** Where the ball was struck: at a toss, its strike point, however late. */
       readonly position: Readonly<Vec3>;
       readonly swing: SwingEvent;
       readonly side: SwingEvent['side'];
       readonly delta: number;
-      readonly plan: ReturnPlan;
-      /** The Return, just launched. */
+      readonly plan: ReturnPlan | ServePlan;
+      /** The Return or Serve, just launched. */
       readonly ball: BallState;
     }
   | ReturnFlightResult;
@@ -276,9 +342,27 @@ export interface IncomingTiming {
   readonly topspin: number;
 }
 
+/** The player's Serve toss, as the resolver judges it. */
+export interface TossTiming {
+  /** The toss's Ideal Time on the performance.now() clock: the falling ball at the strike height. */
+  readonly idealAtMs: number;
+  /** Where the Serve is struck from: the ball at the toss's Ideal Time. */
+  readonly strike: Readonly<Vec3>;
+}
+
 export interface ShotResolver {
   /** A Shot toward the player was launched (a Feed or the Opponent's): its one try is available. */
   startIncoming(incoming: IncomingTiming): void;
+  /**
+   * The player's Serve toss is up: its one try is available, judged like an
+   * incoming Shot's (same Hit Window, Timing Offset, Early, Late and Miss).
+   * An accepted Swing serves (`planServe`, `solvePlannedServe`) from
+   * `toss.strike` at max(now, Ideal Time): from the strike point however
+   * late, because the falling toss is soon too low to serve from. After the
+   * Serve's contact, the resolver judges nothing more (the referee calls the
+   * Serve).
+   */
+  startToss(toss: TossTiming): void;
   /** Judge a Swing, received at `nowMs`. Swings with no incoming Shot to judge, or after the try is used, are ignored. */
   swing(swing: SwingEvent, nowMs: number): ShotEvent[];
   /**
@@ -297,24 +381,53 @@ export interface ShotResolverOptions {
   random: () => number;
   /** The target solver; `solveShot` unless a test stands one in. */
   solve?: ShotSolver;
+  /** The Serve solver; `solveServe` unless a test stands one in. */
+  solveServe?: typeof solveServe;
 }
 
 type FeedState =
   | { readonly phase: 'none' }
-  /** Waiting for a Swing. `earlyDelta`: the last early Swing that kept the try, if any. */
-  | { readonly phase: 'open'; readonly idealAtMs: number | null; readonly topspin: number; readonly earlyDelta: number | null }
-  | { readonly phase: 'accepted'; readonly accepted: Extract<ShotEvent, { type: 'accepted' }> }
+  /**
+   * Waiting for a Swing. `earlyDelta`: the last early Swing that kept the
+   * try, if any. `serveFrom`: at a toss, the strike point (null for an incoming Shot).
+   */
+  | {
+      readonly phase: 'open';
+      readonly idealAtMs: number | null;
+      readonly topspin: number;
+      readonly earlyDelta: number | null;
+      readonly serveFrom: Readonly<Vec3> | null;
+    }
+  | { readonly phase: 'accepted'; readonly accepted: Extract<ShotEvent, { type: 'accepted' }>; readonly serveFrom: Readonly<Vec3> | null }
   | { readonly phase: 'returning' }
   | { readonly phase: 'done' };
 
 export function createShotResolver(options: ShotResolverOptions): ShotResolver {
   const random = options.random;
   const solve = options.solve ?? solveShot;
+  const serveSolver = options.solveServe ?? solveServe;
   let state: FeedState = { phase: 'none' };
+
+  /** Launch the accepted Swing's Return, or its Serve, from where the ball is struck. */
+  function strike(nowMs: number, ball: BallState, accepted: Extract<ShotEvent, { type: 'accepted' }>, serveFrom: Readonly<Vec3> | null): ShotEvent {
+    const { swing, delta, plan } = accepted;
+    const position = serveFrom ? { ...serveFrom } : contactPoint(ball.position);
+    const solution =
+      serveFrom && 'bounce1' in plan
+        ? solvePlannedServe(serveSolver, position, serveIntentOf(plan))
+        : solveReturn(solve, position, { target: plan.target, flightTime: plan.flightTime, topspin: plan.topspin, sidespin: 0 });
+    const seed = Math.floor(random() * 2 ** 32);
+    const struck = launchBall(position, solution.velocity, solution.spin, seed);
+    return { type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: struck };
+  }
 
   return {
     startIncoming(incoming) {
-      state = { phase: 'open', idealAtMs: incoming.idealAtMs, topspin: incoming.topspin, earlyDelta: null };
+      state = { phase: 'open', idealAtMs: incoming.idealAtMs, topspin: incoming.topspin, earlyDelta: null, serveFrom: null };
+    },
+
+    startToss(toss) {
+      state = { phase: 'open', idealAtMs: toss.idealAtMs, topspin: 0, earlyDelta: null, serveFrom: { ...toss.strike } };
     },
 
     swing(swing, nowMs) {
@@ -330,9 +443,11 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         state = { phase: 'done' };
         return [{ type: 'late', delta }];
       }
-      const plan = planReturn({ delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand(), incomingTopspin: state.topspin }, params, random);
+      const input = { delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand() };
+      const { serveFrom } = state;
+      const plan = serveFrom ? planServe(input, serveFrom, params, random) : planReturn({ ...input, incomingTopspin: state.topspin }, params, random);
       const accepted = { type: 'accepted', swing, delta, contactAtMs: Math.max(nowMs, state.idealAtMs), plan } as const;
-      state = { phase: 'accepted', accepted };
+      state = { phase: 'accepted', accepted, serveFrom };
       return [accepted];
     },
 
@@ -346,13 +461,10 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         }
       }
       if (state.phase === 'accepted' && nowMs >= state.accepted.contactAtMs) {
-        const { swing, delta, plan } = state.accepted;
-        const position = contactPoint(ball.position);
-        const solution = solveReturn(solve, position, { target: plan.target, flightTime: plan.flightTime, topspin: plan.topspin, sidespin: 0 });
-        const seed = Math.floor(random() * 2 ** 32);
-        const struck = launchBall(position, solution.velocity, solution.spin, seed);
-        events.push({ type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: struck });
-        state = { phase: 'returning' };
+        const { serveFrom } = state;
+        events.push(strike(nowMs, ball, state.accepted, serveFrom));
+        // A Return's flight is judged here; a Serve's by the referee.
+        state = serveFrom ? { phase: 'done' } : { phase: 'returning' };
       }
       if (state.phase === 'open') {
         // No Swing judged by the end of the Late grace (a Swing is seen

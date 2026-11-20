@@ -2,7 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { revsToRadPerSec } from '../physics/spin.ts';
 import { launchBall, simulate, type BallEvent, type BallState, type Vec3 } from './ball.ts';
 import { lookAhead } from './rally.ts';
-import { judgeServe, OPPONENT_SERVE_FROM, SERVE_BOUNCE1_TOLERANCE_M, SERVE_NET_MARGIN_M, SERVE_TARGET_TOLERANCE_M, solveServe, type ServeIntent } from './serve.ts';
+import { PLAYER_END_Z, TABLE_TOP_Y, TOSS_BEHIND_END_M, TOSS_RISE_M, TOSS_SIDE_M, TOSS_START_HEIGHT_M, TOSS_STRIKE_HEIGHT_M } from './constants.ts';
+import {
+  findTossIdealTime,
+  judgeServe,
+  launchToss,
+  OPPONENT_SERVE_FROM,
+  SERVE_BOUNCE1_TOLERANCE_M,
+  SERVE_NET_MARGIN_M,
+  SERVE_TARGET_TOLERANCE_M,
+  solveServe,
+  type ServeIntent,
+} from './serve.ts';
 import { otherSide, type Side } from './side.ts';
 import { solveShot, type TablePoint } from './solver.ts';
 
@@ -163,5 +174,56 @@ describe.each(BOTH)('judgeServe: a Serve from the %s end, real flights', (server
   it('is a Let that clips the net and then lands on the receiver half', () => {
     const ball = findServe(server, (events) => outline(server, events).join() === 'own,cord,other');
     expect(judgeServe(ball, server)).toBe('let');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The player's automatic toss (spec P2-f2)
+// ---------------------------------------------------------------------------
+
+describe('launchToss', () => {
+  it.each([
+    ['right', 1],
+    ['left', -1],
+  ] as const)('starts 0.1 m behind the player\'s end line on the %s-hand side, 0.1 m above the table, straight up', (hand, sign) => {
+    const toss = launchToss(hand);
+    expect(toss.position).toEqual({ x: sign * TOSS_SIDE_M, y: TABLE_TOP_Y + TOSS_START_HEIGHT_M, z: PLAYER_END_Z + TOSS_BEHIND_END_M });
+    expect(toss.velocity.x).toBe(0);
+    expect(toss.velocity.z).toBe(0);
+    expect(toss.velocity.y).toBeGreaterThan(0);
+    expect(toss.spin).toEqual({ x: 0, y: 0, z: 0 });
+    expect(toss.status).toBe('live');
+  });
+
+  it('rises about TOSS_RISE_M', () => {
+    const toss = launchToss('right');
+    let top = toss.position.y;
+    simulate(toss, { maxTime: 1, until: (s) => ((top = Math.max(top, s.position.y)), s.velocity.y < 0) });
+    const rise = top - toss.position.y;
+    expect(rise).toBeGreaterThan(TOSS_RISE_M - 0.05);
+    expect(rise).toBeLessThanOrEqual(TOSS_RISE_M);
+  });
+});
+
+describe('findTossIdealTime', () => {
+  it('is when the falling toss passes TOSS_STRIKE_HEIGHT_M above the table: the strike, straight above where it started', () => {
+    const toss = launchToss('right');
+    const found = findTossIdealTime(toss);
+    expect(found).not.toBeNull();
+    const { ideal, strike } = found!;
+    expect(ideal.position.y).toBeCloseTo(TABLE_TOP_Y + TOSS_STRIKE_HEIGHT_M, 6);
+    expect(ideal.position.x).toBeCloseTo(toss.position.x, 9);
+    expect(ideal.position.z).toBeCloseTo(toss.position.z, 9);
+    expect(strike.position).toEqual(ideal.position);
+    expect(strike.velocity.y).toBeLessThan(0); // on the way down
+    // Up about 0.4 m and down to 0.25 m: about half a simulated second.
+    expect(ideal.simSeconds).toBeGreaterThan(0.4);
+    expect(ideal.simSeconds).toBeLessThan(0.6);
+    const at = simulate(toss, { maxTime: ideal.simSeconds }).state.position;
+    expect(at.y).toBeCloseTo(ideal.position.y, 2);
+  });
+
+  it('is null for a ball that never comes down through the strike height', () => {
+    expect(findTossIdealTime(launchBall({ x: 0.3, y: TABLE_TOP_Y + 0.1, z: PLAYER_END_Z + 0.1 }, { x: 0, y: 0, z: 0 }))).toBeNull();
   });
 });
