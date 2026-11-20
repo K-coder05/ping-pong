@@ -160,8 +160,10 @@ export interface GameCore {
   swing(swing: SwingEvent, nowMs: number): void;
   /**
    * Pause or resume (onboarding, calibration, hand lost). Paused, the Feeder
-   * sends no new Feed and Swings are ignored; a ball in flight plays out (in a
-   * Match, so does the Rally). Cheap to call every frame.
+   * sends no new Feed and Swings are ignored; a Feed in flight plays out. In a
+   * Match, pausing mid-Rally voids it (no Point, the Serve is played again
+   * after the "3, 2, 1" once resumed); between Rallies it just waits. Cheap to
+   * call every frame.
    */
   setPaused(paused: boolean): void;
   /** Make `ball` the ball in play (debug throws). */
@@ -231,7 +233,8 @@ export function createGameCore(options: GameCoreOptions): GameCore {
    */
   let serveClock: { phase: 'waiting' | 'countdown' | 'toss' | 'serving'; seconds: number } = { phase: 'waiting', seconds: 0 };
   const feeder = createFeeder({ random });
-  const resolver = createShotResolver({ params: options.resolverParams, hand: options.hand, random, solveServe: serveSolver });
+  const newResolver = () => createShotResolver({ params: options.resolverParams, hand: options.hand, random, solveServe: serveSolver });
+  let resolver = newResolver();
   const score = createScore();
   const shotEvents = createListeners<ShotEvent>();
   const bounces = createListeners<BounceEvent>();
@@ -398,6 +401,21 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     if (serveClock.seconds >= FEED_COUNTDOWN_FROM * FEED_COUNTDOWN_STEP_S.value) serve(nowMs);
   }
 
+  /**
+   * Pausing mid-Rally in a Match (the player's hand is lost): the Rally is
+   * void, with no Point, and the same Serve is played again after the usual
+   * wait and "3, 2, 1" once resumed. The ball is put back at rest and the
+   * resolver's pending try dropped, so nothing more is judged from it.
+   */
+  function replayRally(): void {
+    if (!match || !rallyOn) return;
+    rallyOn = false;
+    opponentPlan = null;
+    match = cancelRally(match);
+    ball = launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 }, { x: 0, y: 0, z: 0 });
+    resolver = newResolver();
+  }
+
   function handleShot(event: ShotEvent, nowMs: number): void {
     if (event.type === 'contact') ball = event.ball;
     if (mode === 'drill') {
@@ -512,6 +530,7 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     },
 
     setPaused(next) {
+      if (next && !paused) replayRally();
       paused = next;
       feeder.setPaused(next);
       // Between Rallies, the wait and any "3, 2, 1" start over. A toss already

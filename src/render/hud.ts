@@ -2,13 +2,18 @@
  * The player's heads-up display, drawn as HTML over the canvas: the "3, 2, 1"
  * cue before each Feed, the Streak and best Streak, short feedback such as
  * "Early!", "Late!" and "Miss", and the "Can't see your hand" tracking-loss
- * banner. Sized to be read from 1.5–2 m away.
+ * banner. In a Match, the score, the server and the standing ("Game point",
+ * "Deuce") replace the Streak. Sized to be read from 1.5–2 m away.
  */
+import type { MatchHudModel } from './hudModel.ts';
+
 export interface Hud {
   /** Show 3, 2 or 1 big in the middle of the screen; null hides it. Cheap to call every frame. */
   showCountdown(count: number | null): void;
   /** Show the current and best Streak. */
   showStreak(streak: number, best: number): void;
+  /** Match: show the score row (score, server with Serves left, Games line, standing); null hides it and shows the Streak again. Cheap to call every frame. */
+  showMatch(model: MatchHudModel | null): void;
   /** Flash a short message (e.g. "Early!") for a moment. */
   showFeedback(text: string): void;
   /** Show or hide the "Can't see your hand" banner (SPEC "Tracking loss"). Cheap to call every frame. */
@@ -56,6 +61,37 @@ export function createHud(): Hud {
   Object.assign(bestCount.style, { font: `600 3.2vmin/1.2 ${FONT}`, opacity: '0.85' });
   streak.append(streakCount, bestCount);
 
+  const match = document.createElement('div');
+  match.setAttribute('aria-live', 'polite');
+  Object.assign(match.style, {
+    position: 'fixed',
+    top: '2vmin',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'none', // 'block' in a Match
+    pointerEvents: 'none',
+    zIndex: '5',
+    color: '#ffffff',
+    textShadow: SHADOW,
+    textAlign: 'center',
+    whiteSpace: 'nowrap',
+  });
+  const row = document.createElement('div');
+  Object.assign(row.style, { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '3vmin' });
+  const slotStyle = { width: '14vmin', font: `700 4vmin/1 ${FONT}`, letterSpacing: '0.1em' };
+  const playerSlot = document.createElement('div');
+  const opponentSlot = document.createElement('div');
+  Object.assign(playerSlot.style, { ...slotStyle, textAlign: 'right' });
+  Object.assign(opponentSlot.style, { ...slotStyle, textAlign: 'left' });
+  const scoreText = document.createElement('div');
+  Object.assign(scoreText.style, { font: `800 10vmin/1 ${FONT}`, fontVariantNumeric: 'tabular-nums' });
+  row.append(playerSlot, scoreText, opponentSlot);
+  const gamesText = document.createElement('div');
+  Object.assign(gamesText.style, { font: `600 3.2vmin/1.3 ${FONT}`, opacity: '0.85' });
+  const statusText = document.createElement('div');
+  Object.assign(statusText.style, { font: `800 4vmin/1.3 ${FONT}`, color: '#ffd84a' });
+  match.append(row, gamesText, statusText);
+
   const feedback = document.createElement('div');
   feedback.setAttribute('aria-live', 'assertive');
   Object.assign(feedback.style, {
@@ -94,7 +130,7 @@ export function createHud(): Hud {
     whiteSpace: 'nowrap',
   });
 
-  document.body.append(countdown, streak, feedback, handLost);
+  document.body.append(countdown, streak, match, feedback, handLost);
 
   let shownCount: number | null = null;
   let shownHandLost = false;
@@ -109,6 +145,18 @@ export function createHud(): Hud {
     showStreak(current, best) {
       streakCount.textContent = `Streak ${current}`;
       bestCount.textContent = `Best ${best}`;
+    },
+    showMatch(model) {
+      match.style.display = model ? 'block' : 'none';
+      streak.style.visibility = model ? 'hidden' : 'visible';
+      if (!model) return;
+      scoreText.textContent = model.score;
+      gamesText.textContent = model.gamesLine ?? '';
+      statusText.textContent = model.status ?? '';
+      // A paddle and a dot per Serve left, by whoever serves.
+      const mark = model.serving ? `\u{1F3D3} ${'\u25CF'.repeat(model.serving.servesLeft)}` : '';
+      playerSlot.textContent = model.serving?.side === 'player' ? mark : '';
+      opponentSlot.textContent = model.serving?.side === 'opponent' ? mark : '';
     },
     showFeedback(text) {
       feedback.textContent = text;

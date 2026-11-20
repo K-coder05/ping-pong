@@ -504,6 +504,46 @@ describe('GameCore: a scored Match', () => {
     expect(nowMs - resumedAt).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
   });
 
+  it('losing the hand mid-Rally voids it: no Point, and the same Serve is played again after "3, 2, 1"', () => {
+    const opponent = countingOpponent();
+    const core = newMatchCore(17, opponent);
+    const run: { rally: RallyEvent[]; match: MatchEvent[]; shots: ShotEvent[] } = { rally: [], match: [], shots: [] };
+    core.onRally((e) => run.rally.push(e));
+    core.onMatch((e) => run.match.push(e));
+    core.onShot((e) => run.shots.push(e));
+    let nowMs = START_MS;
+    const step = () => core.frame({ nowMs: (nowMs += 1000 * FRAME_S), elapsedSeconds: FRAME_S });
+    while (opponent.serves === 0) step();
+    for (let i = 0; i < 10; i++) step(); // the Serve is in flight
+    expect(core.match!.phase).toBe('rally');
+    const before = core.match!;
+
+    core.setPaused(true);
+    expect(core.match).toMatchObject({ phase: 'pre-serve', points: before.points, server: before.server, servesLeft: before.servesLeft });
+    for (let i = 0; i < 1200; i++) step(); // the ball would have been long dead
+    expect(run.match).toEqual([]);
+    expect(run.rally.filter((e) => e.type === 'end')).toEqual([]);
+    expect(run.shots).toEqual([]); // no Miss either
+    expect(opponent.serves).toBe(1);
+
+    core.setPaused(false);
+    const resumedAt = nowMs;
+    while (opponent.serves === 1) step();
+    expect(nowMs - resumedAt).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
+    expect(core.match).toMatchObject({ phase: 'rally', points: before.points, server: before.server, servesLeft: before.servesLeft });
+    expect(run.match).toEqual([]);
+  });
+
+  it('losing the hand between Rallies just pauses: no Point, nothing replayed', () => {
+    const core = newMatchCore(18);
+    const run = runMatch(core, () => null, (r) => points(r).length >= 1, 60);
+    core.setPaused(true);
+    const after = core.match;
+    for (let i = 0; i < 600; i++) core.frame({ nowMs: START_MS + 100000 + i * 16, elapsedSeconds: FRAME_S });
+    expect(core.match).toEqual(after);
+    expect(points(run)).toHaveLength(1);
+  });
+
   it('after a Game, waits GAME_BREAK_S more and starts the next; after the Match, never serves again', () => {
     const core = newMatchCore(16, undefined, { match: { pointsToWin: 2, winBy: 1, bestOf: 3 } });
     const firstServer = core.match!.server;
@@ -652,6 +692,37 @@ describe("GameCore: the player's Serve", () => {
     const resumedAt = nowMs;
     while (tosses === 1) step();
     expect(nowMs - resumedAt).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
+  });
+
+  it('losing the hand mid-Rally on the player\'s own Serve voids it: no Point, and the player tosses again after "3, 2, 1"', () => {
+    const core = newMatchCore(36, undefined, { firstServer: 'player' });
+    const nextSwing = scriptedMatchPlayer(core, (i) => i === core.toss);
+    let tosses = 0;
+    core.onIncoming((i) => i === core.toss && tosses++);
+    const match: MatchEvent[] = [];
+    core.onMatch((e) => match.push(e));
+    let nowMs = START_MS;
+    const step = () => {
+      nowMs += 1000 * FRAME_S;
+      const swing = nextSwing(nowMs);
+      if (swing) core.swing(swing, nowMs);
+      core.frame({ nowMs, elapsedSeconds: FRAME_S });
+    };
+    while (core.match!.phase !== 'rally') step();
+    for (let i = 0; i < 5; i++) step();
+    expect(core.match!.phase).toBe('rally');
+
+    core.setPaused(true);
+    expect(core.match).toMatchObject({ phase: 'pre-serve', points: { player: 0, opponent: 0 }, server: 'player', servesLeft: 2 });
+    for (let i = 0; i < 1200; i++) step();
+    expect(match).toEqual([]);
+    expect(tosses).toBe(1);
+
+    core.setPaused(false);
+    const resumedAt = nowMs;
+    while (tosses === 1) step();
+    expect(nowMs - resumedAt).toBeGreaterThanOrEqual(SERVE_WAIT_MS);
+    expect(core.match).toMatchObject({ points: { player: 0, opponent: 0 }, server: 'player', servesLeft: 2 });
   });
 
   it('serves in the Match\'s order for a whole Game through a deuce: every 2 Points, then every Point from 10–10', () => {

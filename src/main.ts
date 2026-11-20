@@ -35,7 +35,7 @@ import {
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './game/constants.ts';
-import { createGameCore, describeMatchEvent, gameModeFromSearch } from './game/core.ts';
+import { createGameCore, DEFAULT_MATCH_CONFIG, gameModeFromSearch } from './game/core.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
 import { createBrain } from './opponent/brain.ts';
@@ -57,6 +57,7 @@ import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode } from './render/debugMode.ts';
 import { askHandedness } from './render/handednessPrompt.ts';
 import { createHud } from './render/hud.ts';
+import { matchHud, type HudEvent } from './render/hudModel.ts';
 import { createOnboardingScreens } from './render/onboardingScreens.ts';
 import { createPaddle } from './render/paddle.ts';
 import { createTableScene } from './render/scene.ts';
@@ -257,7 +258,21 @@ core.onShot((event) => {
   }
 });
 core.onBounce(() => sounds.bounce());
-core.onMatch((e) => console.log(`[match] ${describeMatchEvent(e)}`));
+
+/** Match HUD: the score row follows the core's Match state; each Point or Let flashes its banner. */
+let lastMatchEvent: HudEvent | null = null;
+function showMatchHud(): void {
+  if (core.match) hud.showMatch(matchHud(core.match, DEFAULT_MATCH_CONFIG, lastMatchEvent));
+}
+core.onMatch((e) => {
+  lastMatchEvent = e;
+  const banner = e.type === 'next-game' ? null : matchHud(e.match, DEFAULT_MATCH_CONFIG, e).banner;
+  if (banner) hud.showFeedback(banner);
+  if (e.type === 'point' && e.match.phase === 'pre-serve') {
+    const status = matchHud(e.match, DEFAULT_MATCH_CONFIG, null).status;
+    if (status) setTimeout(() => hud.showFeedback(status), 900);
+  }
+});
 
 /** The play log: one entry per Shot coming to the player (fit with `npm run fit-player`). */
 const playLog = createPlayLogRecorder({ mode: core.mode });
@@ -295,8 +310,15 @@ const IDEAL_MARKER_HOLD_S = 0.3;
 
 /** The debug Ideal Time marker for the current Feed, or null while there is nothing to show. */
 function idealTimeMarker() {
+  if (!SHOW_IDEAL_TIME_MARKER.value) return null;
+  const toss = core.toss;
+  if (toss) {
+    // The player's Serve toss, from its launch (the Feeder's clock doesn't run in a Match).
+    const sinceToss = ((performance.now() - toss.launchedAtMs) / 1000) * TIME_SCALE.value;
+    return { position: toss.ideal.position, reached: sinceToss >= toss.ideal.simSeconds };
+  }
   const ideal = core.feeder.currentFeed?.idealTime;
-  if (!SHOW_IDEAL_TIME_MARKER.value || !ideal) return null;
+  if (!ideal) return null;
   const sinceFeed = core.feeder.simSecondsSinceFeed;
   if (sinceFeed > ideal.simSeconds + IDEAL_MARKER_HOLD_S) return null;
   return { position: ideal.position, reached: sinceFeed >= ideal.simSeconds };
@@ -340,6 +362,7 @@ function frame(now: number): void {
   hud.showHandLost((drilling() || calibrating) && handLost());
   core.frame({ nowMs: now, elapsedSeconds });
   hud.showCountdown(core.countdown);
+  showMatchHud();
 
   debug.update(elapsedSeconds);
   ballStatus.update(core.ball, debug.active);
