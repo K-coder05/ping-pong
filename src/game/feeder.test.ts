@@ -22,7 +22,7 @@ import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type So
 
 describe('Ideal Time', () => {
   it('is the moment the Feed crosses the player end of the table, after its bounce', () => {
-    const { velocity } = solveShot(FEEDER_MOUTH, { target: { x: -0.3, z: 0.6 }, flightTime: 1.0, topspin: 0, sidespin: 0 })!;
+    const { velocity } = solveShot(FEEDER_MOUTH, { target: { x: -0.3, z: 0.7 }, flightTime: 1.0, topspin: 0, sidespin: 0 })!;
     const feed = launchBall(FEEDER_MOUTH, velocity);
 
     const ideal = findIdealTime(feed);
@@ -44,12 +44,30 @@ describe('Ideal Time', () => {
     expect(before.position.z).toBeLessThan(PLAYER_END_Z);
     expect(ball.position.z).toBeGreaterThanOrEqual(PLAYER_END_Z);
     expect(ideal!.position.z).toBeCloseTo(PLAYER_END_Z, 6);
-    // Within that one substep's travel (a few millimetres) of where the ball really was.
-    expect(Math.abs(ideal!.position.x - ball.position.x)).toBeLessThan(0.01);
-    expect(Math.abs(ideal!.position.y - ball.position.y)).toBeLessThan(0.01);
+    // Within that one substep's travel (about a centimetre) of where the ball really was.
+    expect(Math.abs(ideal!.position.x - ball.position.x)).toBeLessThanOrEqual(Math.abs(ball.position.x - before.position.x) + 1e-9);
+    expect(Math.abs(ideal!.position.y - ball.position.y)).toBeLessThanOrEqual(Math.abs(ball.position.y - before.position.y) + 1e-9);
     // A 1 s Feed reaches the end a few tenths of a second after it lands.
     expect(ideal!.simSeconds).toBeGreaterThan(1.0);
     expect(ideal!.simSeconds).toBeLessThan(1.8);
+  });
+
+  // Guards the target area against bounce changes (µ, the bounce model) that
+  // would make short or slow Feeds bounce twice on the player half.
+  it.each([
+    ['fastest', FEED_FLIGHT_TIME_S.min],
+    ['default', FEED_FLIGHT_TIME_S.default],
+    ['slowest', FEED_FLIGHT_TIME_S.max],
+  ])('exists for Feeds aimed anywhere on the edges of the target area, at the %s flight time', (_label, flightTime) => {
+    const xs = [-FEED_TARGET_HALF_WIDTH, 0, FEED_TARGET_HALF_WIDTH];
+    const zs = [FEED_TARGET_Z_MIN, (FEED_TARGET_Z_MIN + FEED_TARGET_Z_MAX) / 2, FEED_TARGET_Z_MAX];
+    for (const x of xs) {
+      for (const z of zs) {
+        const solution = solveShot(FEEDER_MOUTH, { target: { x, z }, flightTime, topspin: 0, sidespin: 0 });
+        expect(solution, `solve (${x}, ${z})`).not.toBeNull();
+        expect(findIdealTime(launchBall(FEEDER_MOUTH, solution!.velocity)), `target (${x}, ${z})`).not.toBeNull();
+      }
+    }
   });
 
   it('is null for a ball that never reaches the player end after a bounce on the player half', () => {

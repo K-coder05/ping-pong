@@ -70,8 +70,13 @@ export const FEED_MAX_DRAWS = 5;
 export const FEEDER_MOUTH = { x: 0, y: TABLE_TOP_Y + 0.3, z: FEEDER_END_Z } as const;
 /** Feed landing targets: x within ±this, metres. */
 export const FEED_TARGET_HALF_WIDTH = 0.5;
-/** Feed landing targets: z from this ... */
-export const FEED_TARGET_Z_MIN = 0.5;
+/**
+ * Feed landing targets: z from this ... Not shorter: with the spin-aware table
+ * bounce (spec P1-b), a steep, short Feed leaves the bounce rolling and would
+ * bounce twice on the player half before the end line, so it would have no
+ * Ideal Time (at the slowest FEED_FLIGHT_TIME_S, targets up to z ≈ 0.66 do).
+ */
+export const FEED_TARGET_Z_MIN = 0.7;
 /** ... to this, on the player's half. */
 export const FEED_TARGET_Z_MAX = 1.0;
 /** Every this many Returns in the Streak, Feeds get faster ... */
@@ -103,8 +108,15 @@ export const MAX_FRAME_DT = 0.1;
  * substep, buzzing the bounce sound and tripping the double-bounce rule.
  */
 export const SETTLE_SPEED = 0.25;
-/** Share of its speed toward the net a ball keeps, dropping back off it (no net-cord physics). */
+/** Share of its speed toward the net a ball keeps, dropping back off it after hitting the net (not a Net-cord). */
 export const NET_REBOUND = 0.1;
+/** κ = mr²/I in the table bounce: 3/2 for a thin spherical shell (spec P1-b). */
+export const TABLE_KAPPA = 1.5;
+/**
+ * Horizontal speed kept by a table contact too slow to bounce (a settle), so a
+ * ball rolling or resting on the table comes to a stop.
+ */
+export const TABLE_SETTLE_FRICTION = 0.9;
 /** The floor is scenery: it only stops a ball that left the table from falling forever. */
 export const FLOOR_RESTITUTION = 0.6;
 export const FLOOR_FRICTION = 0.8;
@@ -164,8 +176,13 @@ export const FEED_PAUSE_S = knobs.number({ name: 'FEED_PAUSE_S', min: 0, max: 5,
 /** Real seconds each number of the "3, 2, 1" cue stays up. */
 export const FEED_COUNTDOWN_STEP_S = knobs.number({ name: 'FEED_COUNTDOWN_STEP_S', min: 0.2, max: 1.5, step: 0.05, default: 0.5, group: 'Feeder' });
 
-/** Horizontal speed kept by a table bounce (friction). */
-export const BOUNCE_FRICTION = knobs.number({ name: 'BOUNCE_FRICTION', min: 0.5, max: 1, step: 0.01, default: 0.9, group: 'Physics' });
+/**
+ * Ball–table friction coefficient µ in the spin-aware table bounce
+ * (`physics/bounce.ts`): how much of the contact point's slip a bounce trades
+ * between speed and Spin. 0.25 from Sony AI's 2026 table tennis physics paper
+ * (spec P1-b). Tuned in the physics view (P1-d).
+ */
+export const TABLE_MU = knobs.number({ name: 'TABLE_MU', min: 0, max: 0.6, step: 0.01, default: 0.25, group: 'Physics' });
 /**
  * Magnus constant kM: the ball's sideways push is kM·(ω × v). 0.003 gives
  * 7.5 m/s² for 50 rev/s at 8 m/s, comparable to gravity: a game-feel guess,

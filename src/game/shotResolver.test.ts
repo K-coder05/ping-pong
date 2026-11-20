@@ -262,7 +262,7 @@ describe('a Feed with a Swing in the Hit Window', () => {
 
   it('still returns a late Swing when the ball has already dropped below the table top past its end', () => {
     // A short Feed falls fast after its Ideal Time: 190 ms later it is under the table top.
-    const feedTarget = { x: 0.3, z: 0.5 };
+    const feedTarget = { x: 0.3, z: 0.7 };
     const { idealAtMs } = makeFeed(feedTarget);
     const played = playFeed({ feedTarget, swingsAtMs: [idealAtMs + 190] });
     expect(types(played)).toEqual(['accepted', 'contact', 'return']);
