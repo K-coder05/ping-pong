@@ -37,6 +37,8 @@ import {
 import { createGameCore, gameModeFromSearch } from './game/core.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
+import { createBrain } from './opponent/brain.ts';
+import { DIFFICULTIES, difficultyFromSearch } from './opponent/difficulty.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { onboardingSteps, runOnboarding } from './game/onboarding.ts';
@@ -194,9 +196,20 @@ console.log(`[seed] ${seed} (reload with ?seed=${seed} to replay)`);
 
 /**
  * The game: the ball in play, the Feeder, the shot resolver and the Streak.
- * `?mode=match` plays Rallies against the scripted Opponent instead of Return Drill.
+ * `?mode=match` plays Rallies against the Opponent instead of Return Drill, at
+ * the Difficulty `?difficulty=novice|intermediate|expert` asks for
+ * (Intermediate otherwise); it never changes during the Match.
  */
-const core = createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: hittingHand, mode: gameModeFromSearch(window.location.search) });
+const mode = gameModeFromSearch(window.location.search);
+const difficulty = difficultyFromSearch(window.location.search);
+if (mode === 'match') console.log(`[match] Difficulty: ${difficulty} (?difficulty=novice|intermediate|expert)`);
+const core = createGameCore({
+  random: makeRng(seed),
+  resolverParams: knobResolverParams,
+  hand: hittingHand,
+  mode,
+  opponent: createBrain(DIFFICULTIES[difficulty]),
+});
 const sounds = createSounds();
 unlockAudioOnGesture(sounds);
 

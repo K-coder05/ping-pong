@@ -57,7 +57,11 @@ export interface GameCoreOptions {
   hand: () => Hand;
   /** Return Drill unless told otherwise. */
   mode?: GameMode;
-  /** Who plays the far end in a Match: the scripted Opponent unless told otherwise. */
+  /**
+   * Who plays the far end in a Match: the game passes the Opponent's brain at
+   * the Match's Difficulty (`createBrain`, spec P2-c); the scripted Opponent
+   * (no mistakes) unless told otherwise, for tests.
+   */
   opponent?: Opponent;
 }
 
@@ -71,6 +75,14 @@ export interface CoreFrame {
 
 export type BounceEvent = Extract<BallEvent, { type: 'bounce' }>;
 
+/** The Opponent's decision for the Shot coming toward it (ADR 0002), made at that Shot's launch. */
+export interface OpponentPlan {
+  /** The Shot coming toward the Opponent, with its Ideal Time and the ball there. */
+  readonly incoming: Incoming;
+  /** The Shot it will strike at the Ideal Time, or a Whiff. */
+  readonly choice: ShotIntent | 'whiff';
+}
+
 export interface GameCore {
   readonly mode: GameMode;
   /** The one ball in play; replaced by each Feed, Return, Opponent Shot and debug throw. */
@@ -78,6 +90,14 @@ export interface GameCore {
   readonly feeder: Feeder;
   /** The Streak and the best Streak this session (Return Drill; it stays 0 in a Match). */
   readonly streak: StreakState;
+  /**
+   * In a Match, the Opponent's plan for the Shot coming toward it: set when
+   * that Shot launches, cleared when the Opponent strikes or Whiffs at the
+   * Ideal Time, or the Rally ends. Null otherwise (and always in Return
+   * Drill). The Opponent's body reads it to move and swing (P2-d); it never
+   * changes an outcome.
+   */
+  readonly opponentPlan: OpponentPlan | null;
   /** Advance one frame: physics, the referee, the resolver, the Opponent, then the Feeder. */
   frame(f: CoreFrame): void;
   /** Judge a Swing received at `nowMs`. Ignored while paused. */
@@ -127,7 +147,7 @@ export function createGameCore(options: GameCoreOptions): GameCore {
   /** The index of the latest Shot in the current Rally (0 = the Feed). */
   let shotIndex = 0;
   /** The Opponent's choice for the Shot coming toward it, struck at its Ideal Time. */
-  let opponentPlan: { incoming: Incoming; choice: ShotIntent | 'whiff' } | null = null;
+  let opponentPlan: OpponentPlan | null = null;
   // In a Match, the Feeder's rally lasts until the referee calls the Rally End.
   const feeder = createFeeder({ random, holdRally: () => rallyOn });
   const resolver = createShotResolver({ params: options.resolverParams, hand: options.hand, random });
@@ -237,6 +257,9 @@ export function createGameCore(options: GameCoreOptions): GameCore {
     feeder,
     get streak() {
       return { streak: score.streak, best: score.best };
+    },
+    get opponentPlan() {
+      return opponentPlan;
     },
 
     frame({ nowMs, elapsedSeconds }) {
