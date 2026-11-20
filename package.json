@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "replay": "node scripts/replayLogs.ts"
+    "replay": "node scripts/replayLogs.ts",
+    "fit-player": "node scripts/fitPlayer.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.2.3",

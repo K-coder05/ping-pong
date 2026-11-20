@@ -40,6 +40,7 @@ import { makeRng, seedFromSearch } from './util/rng.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { onboardingSteps, runOnboarding } from './game/onboarding.ts';
+import { createPlayLogRecorder } from './game/playLog.ts';
 import { contactPoint, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
@@ -238,6 +239,22 @@ core.onShot((event) => {
   }
 });
 core.onBounce(() => sounds.bounce());
+
+/** The play log: one entry per Shot coming to the player (fit with `npm run fit-player`). */
+const playLog = createPlayLogRecorder({ mode: 'drill' });
+core.feeder.onFeed((feed) => playLog.startFeed(feed.idealAtMs));
+core.onShot((event) => playLog.shot(event));
+knobs.button({
+  name: 'Download play log',
+  group: 'Debug',
+  onPress: () => {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([playLog.toText()], { type: 'application/x-ndjson' }));
+    link.download = `play-log-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  },
+});
 
 swings.subscribe((swing) => {
   // Pose emits Swings only while the wrist is tracked, which may be newer
