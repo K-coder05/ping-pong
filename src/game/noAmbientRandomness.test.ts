@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-/** Source (not tests) under src/game/ and src/physics/, as raw text. */
-const sources = import.meta.glob(['/src/game/**/*.ts', '/src/physics/**/*.ts', '!/src/**/*.test.ts'], {
+/** Source (not tests) under src/game/, src/physics/ and src/opponent/, as raw text. */
+const sources = import.meta.glob(['/src/game/**/*.ts', '/src/physics/**/*.ts', '/src/opponent/**/*.ts', '!/src/**/*.test.ts'], {
   query: '?raw',
   import: 'default',
   eager: true,
 }) as Record<string, string>;
 
-describe('no ambient randomness or clock in game or physics source', () => {
-  it('scans the game and physics source files', () => {
+describe('no ambient randomness or clock in game, physics or Opponent source', () => {
+  it('scans the game, physics and Opponent source files', () => {
     const paths = Object.keys(sources);
     expect(paths).toContain('/src/game/feeder.ts');
     expect(paths).toContain('/src/physics/spin.ts');

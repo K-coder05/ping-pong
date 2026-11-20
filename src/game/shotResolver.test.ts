@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SwingEvent } from '../input/types.ts';
 import type { Hand } from '../sensing/landmarks.ts';
 import { launchBall, simulate, stepBall, type BallEvent, type BallState, type Vec3 } from './ball.ts';
-import { BALL_RADIUS, FEEDER_END_Z, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
+import { BALL_RADIUS, OPPONENT_END_Z, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
 import { findIdealTime } from './feeder.ts';
 import {
   createShotResolver,
@@ -380,14 +380,14 @@ describe('a Return the solver cannot solve', () => {
 
     const contact = played.events[1] as Extract<ShotEvent, { type: 'contact' }>;
     const planned = contact.plan.target;
-    expect(planned.z).toBeLessThan(FEEDER_END_Z); // planned past the Feeder's end line
+    expect(planned.z).toBeLessThan(OPPONENT_END_Z); // planned past the far end line
     // The zero-spin intent is solved, then solved best-effort: never for another target.
     expect(calls.map((c) => c.opts?.bestEffort ?? false)).toEqual([false, true]);
     for (const { intent } of calls) expect(intent.target).toEqual(planned);
 
     const landing = firstLanding(contact.ball);
     expect(landing.bounced).toBe(false);
-    expect(landing.position.z).toBeLessThan(FEEDER_END_Z);
+    expect(landing.position.z).toBeLessThan(OPPONENT_END_Z);
     expect(Math.hypot(landing.position.x - planned.x, landing.position.z - planned.z)).toBeLessThan(0.02);
   });
 

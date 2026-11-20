@@ -1,17 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { BallEvent } from './ball.ts';
+import type { Side } from './side.ts';
 import { createScore, judgeReturnFlight } from './score.ts';
 
 const at = { x: 0, y: 0.78, z: 0 };
-const bounce = (half: 'player' | 'feeder'): BallEvent => ({ type: 'bounce', half, position: at });
+const bounce = (half: Side): BallEvent => ({ type: 'bounce', half, position: at });
 
 describe('a struck ball', () => {
-  it('is a Return when its first bounce is on the Feeder half', () => {
-    expect(judgeReturnFlight([bounce('feeder'), { type: 'out', reason: 'off-table', position: at }])).toEqual({ type: 'return', position: at });
+  it('is a Return when its first bounce is on the Opponent half', () => {
+    expect(judgeReturnFlight([bounce('opponent'), { type: 'out', reason: 'off-table', position: at }])).toEqual({ type: 'return', position: at });
   });
 
   it('is not a Return when the net, the floor or the player half comes first', () => {
-    expect(judgeReturnFlight([{ type: 'net', position: at }, bounce('feeder')])).toEqual({ type: 'off-target', reason: 'net', position: at });
+    expect(judgeReturnFlight([{ type: 'net', position: at }, bounce('opponent')])).toEqual({ type: 'off-target', reason: 'net', position: at });
     expect(judgeReturnFlight([{ type: 'out', reason: 'off-table', position: at }])).toEqual({ type: 'off-target', reason: 'out', position: at });
     expect(judgeReturnFlight([bounce('player')])).toEqual({ type: 'off-target', reason: 'own-half', position: at });
   });

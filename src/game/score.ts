@@ -9,21 +9,21 @@ import { createListeners } from './listeners.ts';
 
 /** How a struck ball's flight was decided. */
 export type ReturnFlightResult =
-  /** First bounce on the Feeder's half: a Return. */
+  /** First bounce on the far half (the Opponent's; the Feeder's in Return Drill): a Return. */
   | { readonly type: 'return'; readonly position: Readonly<Vec3> }
   /** Into the net, off the table without a bounce, or onto the player's own half first. */
   | { readonly type: 'off-target'; readonly reason: 'net' | 'out' | 'own-half'; readonly position: Readonly<Vec3> };
 
 /**
  * Judge a struck ball from its ball events since launch, in order: a Return
- * if its first bounce is on the Feeder's half; off target if the net, an out
+ * if its first bounce is on the far half (the Opponent's); off target if the net, an out
  * or a bounce on the player's half comes first; null while undecided.
  */
 export function judgeReturnFlight(events: readonly BallEvent[]): ReturnFlightResult | null {
   for (const event of events) {
     switch (event.type) {
       case 'bounce':
-        return event.half === 'feeder'
+        return event.half === 'opponent'
           ? { type: 'return', position: event.position }
           : { type: 'off-target', reason: 'own-half', position: event.position };
       case 'net':
@@ -41,7 +41,7 @@ export interface StreakState {
 }
 
 export interface Score extends StreakState {
-  /** A Return: its first bounce was on the Feeder's half. */
+  /** A Return: its first bounce was on the far half. */
   addReturn(): void;
   /** Any failed Feed: Early, Late, Miss, or a Swing whose ball wasn't a Return. */
   breakStreak(): void;

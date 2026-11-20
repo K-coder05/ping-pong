@@ -45,7 +45,7 @@ describe('ball physics', () => {
     // Once dead, nothing after the net hit can mark it out (it falls, bounces, rolls off).
     expect(types).not.toContain('out');
     // It never got past the net onto the Feeder's half.
-    expect(run.events.filter((e) => e.event.type === 'bounce' && e.event.half === 'feeder')).toEqual([]);
+    expect(run.events.filter((e) => e.event.type === 'bounce' && e.event.half === 'opponent')).toEqual([]);
   });
 
   it('a ball leaving the table edges is marked out once it drops below the table top', () => {
@@ -91,7 +91,7 @@ describe('ball physics', () => {
     });
 
     expect(run.events.map((e) => e.event)).toEqual([
-      expect.objectContaining({ type: 'bounce', half: 'feeder' }),
+      expect.objectContaining({ type: 'bounce', half: 'opponent' }),
       expect.objectContaining({ type: 'bounce', half: 'player' }),
     ]);
     expect(run.state.status).toBe('live');
@@ -445,7 +445,7 @@ describe('ball physics', () => {
         });
         expect(run.events.filter((e) => e.event.type === 'cord')).toHaveLength(1);
         const bounce = run.events.find((e) => e.event.type === 'bounce')!.event;
-        if (bounce.type === 'bounce' && bounce.half === 'feeder') over++;
+        if (bounce.type === 'bounce' && bounce.half === 'opponent') over++;
         else back++;
       }
       expect(over).toBeGreaterThan(0);
@@ -459,9 +459,9 @@ describe('ball physics', () => {
       });
 
       const events = run.events.map((e) => e.event);
-      expect(events).toEqual([expect.objectContaining({ type: 'cord' }), expect.objectContaining({ type: 'bounce', half: 'feeder' })]);
+      expect(events).toEqual([expect.objectContaining({ type: 'cord' }), expect.objectContaining({ type: 'bounce', half: 'opponent' })]);
       expect(run.state.status).toBe('live');
-      expect(run.state.lastBounceHalf).toBe('feeder');
+      expect(run.state.lastBounceHalf).toBe('opponent');
       expect(judgeReturnFlight(events)).toMatchObject({ type: 'return' });
     });
 

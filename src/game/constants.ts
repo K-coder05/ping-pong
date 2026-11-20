@@ -8,8 +8,9 @@
  * into a module-level variable, or panel changes won't take effect.
  *
  * World frame, in metres: x and z are centred on the table, y is up from the
- * floor (so the table top is at y = TABLE_TOP_Y). z runs from the Feeder
- * (negative) to the player (positive); the net is at z = 0.
+ * floor (so the table top is at y = TABLE_TOP_Y). z runs from the Opponent's
+ * end (negative; the Feeder stands there in Return Drill) to the player's
+ * (positive); the net is at z = 0.
  */
 
 import { knobs } from './knobs.ts';
@@ -26,8 +27,8 @@ export const TABLE_THICKNESS = 0.03;
 export const TABLE_HALF_LENGTH = TABLE_LENGTH / 2;
 /** z of the player's end of the table. */
 export const PLAYER_END_Z = TABLE_HALF_LENGTH;
-/** z of the Feeder's end of the table. */
-export const FEEDER_END_Z = -TABLE_HALF_LENGTH;
+/** z of the Opponent's end of the table (where the Feeder stands in Return Drill). */
+export const OPPONENT_END_Z = -TABLE_HALF_LENGTH;
 
 export const NET_HEIGHT = 0.1525;
 /** How far the net reaches past each side line. */
@@ -67,7 +68,7 @@ export const FEED_MAX_DRAWS = 5;
 // ---------------------------------------------------------------------------
 
 /** Where the Feeder launches each Feed: its far end line, about 0.3 m above the table. */
-export const FEEDER_MOUTH = { x: 0, y: TABLE_TOP_Y + 0.3, z: FEEDER_END_Z } as const;
+export const FEEDER_MOUTH = { x: 0, y: TABLE_TOP_Y + 0.3, z: OPPONENT_END_Z } as const;
 /** Feed landing targets: x within ±this, metres. */
 export const FEED_TARGET_HALF_WIDTH = 0.5;
 /**

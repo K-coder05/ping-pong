@@ -1,11 +1,13 @@
 /**
  * Boot and game loop for Return Drill.
  *
- * Each animation frame: measure real elapsed time, advance the simulation,
- * let the shot resolver strike a due Return and judge its flight, let the
- * Feeder react (rally end, "3, 2, 1", next Feed), update debug mode, then
- * draw from whichever camera is active. Swings arrive between frames from the
- * active `SwingSource`; the game never knows whether that is pose or mouse.
+ * The game itself (ball physics, the Feeder, the shot resolver, the Streak)
+ * runs in the headless `GameCore` (`game/core.ts`). Each animation frame:
+ * measure real elapsed time, tell the core whether it is paused, advance it
+ * one frame, update debug mode, then draw from whichever camera is active.
+ * Swings arrive between frames from the active `SwingSource` and go straight
+ * to the core; the game never knows whether they come from pose or mouse. The
+ * Paddle, sounds and HUD follow the core's Shot and bounce events.
  *
  * Without a URL flag, play is with your hand: onboarding starts the camera
  * (asking first, for a first-time player), then asks for the hitting hand and
@@ -19,33 +21,26 @@
  * mouse's near-zero-latency Swings); TIMING_OFFSET_MS starts at 0 there.
  */
 import { createSounds, unlockAudioOnGesture } from './audio/sounds.ts';
-import { launchBall, simulate, stepBall, type BallEvent, type BallState } from './game/ball.ts';
+import { simulate } from './game/ball.ts';
 import {
   BALL_DRAW_SCALE,
-  BALL_RADIUS,
   CONTACT_ASSIST,
   LATENCY_EXTRAPOLATION,
   LATENCY_EXTRAPOLATION_MS,
-  MAX_FRAME_DT,
   MOUSE_SHOULDER_WIDTH,
   PADDLE_MAPPING_RANGE,
   PADDLE_REST_PY,
-  PHYSICS_DT,
   SHOW_IDEAL_TIME_MARKER,
-  TABLE_TOP_Y,
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './game/constants.ts';
+import { createGameCore } from './game/core.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
-import { createFeeder } from './game/feeder.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
-import { createListeners } from './game/listeners.ts';
 import { onboardingSteps, runOnboarding } from './game/onboarding.ts';
-import { createScore } from './game/score.ts';
-import { contactPoint, createShotResolver, feedResult, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
-import { createSimClock } from './game/simClock.ts';
+import { contactPoint, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput, startCamera } from './input/installPoseInput.ts';
@@ -184,20 +179,20 @@ const handLost = (): boolean => !mouse && pose.tracking === 'lost';
 const drilling = (): boolean => drillStarted && !calibrating;
 
 /**
- * The one ball in play: at rest on the player's half until something launches
- * it. Anything that launches a ball (a Feed, a Return, a debug throw) replaces
- * it; the Feeder watches whichever ball is here to tell when the rally ends.
+ * Whether the core is paused: no new Feed and no Swings before onboarding
+ * finishes, while recalibrating (its Swings are not for the resolver), or
+ * while the hand can't be seen; a Feed in flight plays out.
  */
-let ball: BallState = launchBall({ x: 0, y: TABLE_TOP_Y + BALL_RADIUS, z: 0.7 }, { x: 0, y: 0, z: 0 });
-const simClock = createSimClock();
+const corePaused = (): boolean => !drilling() || waitingForHand();
+
 const ballStatus = createBallStatusReadout();
 
 /** Every random draw in the game comes from this one seeded source: `?seed=<n>` replays a session. */
 const seed = seedFromSearch(window.location.search);
 console.log(`[seed] ${seed} (reload with ?seed=${seed} to replay)`);
-const random = makeRng(seed);
 
-const feeder = createFeeder({ random });
+/** The game: the ball in play, the Feeder, the shot resolver and the Streak. */
+const core = createGameCore({ random: makeRng(seed), resolverParams: knobResolverParams, hand: hittingHand });
 const sounds = createSounds();
 unlockAudioOnGesture(sounds);
 
@@ -217,24 +212,23 @@ const paddle = createPaddle({
   hand: hittingHand,
   predictContact: (contactAtMs, nowMs) => {
     const simSeconds = (Math.max(0, contactAtMs - nowMs) / 1000) * TIME_SCALE.value;
-    return contactPoint(simulate(ball, { maxTime: simSeconds }).state.position);
+    return contactPoint(simulate(core.ball, { maxTime: simSeconds }).state.position);
   },
 });
 
-const resolver = createShotResolver({ params: knobResolverParams, hand: hittingHand, random });
-const score = createScore();
+const FEEDBACK: Partial<Record<ShotEvent['type'], string>> = { early: 'Early!', late: 'Late!', miss: 'Miss' };
 
 /**
- * `shotEvents` carries every resolver event: `accepted` starts the Paddle's
- * Swing animation and schedules the contact tock for `contactAtMs`;
- * `contact` (the frame the Return launches) pins the Paddle's contact frame
- * and point; then the Feed's outcome. `bounces` carries every table bounce,
- * each one a bounce tock.
+ * Every resolver event, after the core has acted on it (the Return made the
+ * ball in play, the Streak updated): the HUD shows the feedback and Streak;
+ * `accepted` starts the Paddle's Swing animation and schedules the contact
+ * tock for `contactAtMs`; `contact` (the frame the Return launches) pins the
+ * Paddle's contact frame and point. Every table bounce is a bounce tock.
  */
-const shotEvents = createListeners<ShotEvent>();
-const bounces = createListeners<Extract<BallEvent, { type: 'bounce' }>>();
-
-shotEvents.subscribe((event) => {
+core.onShot((event) => {
+  const text = event.type === 'off-target' ? (event.reason === 'net' ? 'Net' : 'Out') : FEEDBACK[event.type];
+  if (text) hud.showFeedback(text);
+  hud.showStreak(core.streak.streak, core.streak.best);
   if (event.type === 'accepted') {
     paddle.swing({ onsetMs: event.swing.t, contactAtMs: event.contactAtMs, side: event.swing.side });
     // Scheduled now, so it is heard exactly at the contact moment.
@@ -243,45 +237,29 @@ shotEvents.subscribe((event) => {
     paddle.contact(event.atMs, event.position);
   }
 });
-bounces.subscribe(() => sounds.bounce());
+core.onBounce(() => sounds.bounce());
 
-const FEEDBACK: Partial<Record<ShotEvent['type'], string>> = { early: 'Early!', late: 'Late!', miss: 'Miss' };
-
-function handleShot(event: ShotEvent): void {
-  if (event.type === 'contact') ball = event.ball;
-  const text = event.type === 'off-target' ? (event.reason === 'net' ? 'Net' : 'Out') : FEEDBACK[event.type];
-  if (text) hud.showFeedback(text);
-  const result = feedResult(event);
-  if (result === 'returned') score.addReturn();
-  else if (result === 'failed') score.breakStreak();
-  shotEvents.emit(event);
-}
-
-feeder.onFeed((feed) => {
-  ball = feed.ball;
-  resolver.startFeed(feed);
-});
 swings.subscribe((swing) => {
-  if (drilling()) resolver.swing(swing, performance.now()).forEach(handleShot);
+  // Pose emits Swings only while the wrist is tracked, which may be newer
+  // than the last frame's pause: refresh it first, so the Swing is judged
+  // exactly when the drill is on.
+  core.setPaused(corePaused());
+  core.swing(swing, performance.now());
 });
-score.subscribe(({ streak, best }) => {
-  feeder.setStreak(streak); // faster Feeds every FEED_SPEEDUP_EVERY Returns
-  hud.showStreak(streak, best);
-});
-hud.showStreak(score.streak, score.best);
+hud.showStreak(core.streak.streak, core.streak.best);
 
-knobs.button({ name: 'Drop ball (30 cm)', group: 'Ball', onPress: () => (ball = DEBUG_THROWS.drop()) });
-knobs.button({ name: 'Throw into net', group: 'Ball', onPress: () => (ball = DEBUG_THROWS.intoNet()) });
-knobs.button({ name: 'Throw off table', group: 'Ball', onPress: () => (ball = DEBUG_THROWS.offTable()) });
+knobs.button({ name: 'Drop ball (30 cm)', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.drop()) });
+knobs.button({ name: 'Throw into net', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.intoNet()) });
+knobs.button({ name: 'Throw off table', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.offTable()) });
 
 /** Simulated seconds the Ideal Time marker stays lit after the Feed reaches it. */
 const IDEAL_MARKER_HOLD_S = 0.3;
 
 /** The debug Ideal Time marker for the current Feed, or null while there is nothing to show. */
 function idealTimeMarker() {
-  const ideal = feeder.currentFeed?.idealTime;
+  const ideal = core.feeder.currentFeed?.idealTime;
   if (!SHOW_IDEAL_TIME_MARKER.value || !ideal) return null;
-  const sinceFeed = feeder.simSecondsSinceFeed;
+  const sinceFeed = core.feeder.simSecondsSinceFeed;
   if (sinceFeed > ideal.simSeconds + IDEAL_MARKER_HOLD_S) return null;
   return { position: ideal.position, reached: sinceFeed >= ideal.simSeconds };
 }
@@ -301,34 +279,17 @@ function frame(now: number): void {
   const elapsedSeconds = (now - lastFrameTime) / 1000;
   lastFrameTime = now;
 
-  // Fixed 240 Hz substeps, slowed by TIME_SCALE. This frame's ball events
-  // (bounces for the sound, net and out for the rally) are collected for the
-  // bounce sound and the shot resolver to consume.
-  const steps = simClock.advance(elapsedSeconds, TIME_SCALE.value);
-  const ballEvents: BallEvent[] = [];
-  for (let i = 0; i < steps; i++) {
-    const step = stepBall(ball);
-    ball = step.state;
-    ballEvents.push(...step.events);
-  }
-  for (const event of ballEvents) if (event.type === 'bounce') bounces.emit(event);
-
-  // Judge the Return in flight, strike a due contact (replacing the ball),
-  // or call a Miss, before the Feeder looks at the ball.
-  resolver.update(now, ball, ballEvents).forEach(handleShot);
-
-  // The pause and "3, 2, 1" run on real time, capped like the simulation so a
-  // background tab doesn't fire a Feed the moment it comes back. No new Feed
-  // before onboarding finishes, while recalibrating, or while the hand can't
-  // be seen; a Feed in flight plays out.
-  feeder.setPaused(!drilling() || waitingForHand());
+  // Physics, the shot resolver, then the Feeder (see `game/core.ts`). The
+  // pause only stops new Feeds and Swings, so setting it first is the same as
+  // setting it between the resolver and the Feeder.
+  core.setPaused(corePaused());
   hud.showHandLost((drilling() || calibrating) && handLost());
-  feeder.update({ realSeconds: Math.min(elapsedSeconds, MAX_FRAME_DT), simSeconds: steps * PHYSICS_DT, nowMs: now }, ball);
-  hud.showCountdown(feeder.countdown);
+  core.frame({ nowMs: now, elapsedSeconds });
+  hud.showCountdown(core.feeder.countdown);
 
   debug.update(elapsedSeconds);
-  ballStatus.update(ball, debug.active);
-  tableScene.syncBall(ball.position, ball.spin);
+  ballStatus.update(core.ball, debug.active);
+  tableScene.syncBall(core.ball.position, core.ball.spin);
   tableScene.syncPaddle(paddle.update(now, handPositions.latest));
   tableScene.syncIdealTimeMarker(idealTimeMarker());
   tableScene.render(debug.camera);

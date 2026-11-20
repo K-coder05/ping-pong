@@ -42,11 +42,12 @@ import { decaySpin, flightAcceleration, type FlightParams } from '../physics/fli
 import { classifyNetCrossing, cordVelocity } from '../physics/net.ts';
 import { add, scale, ZERO, type Vec3 } from '../physics/vec3.ts';
 import { makeRng } from '../util/rng.ts';
+import type { Side } from './side.ts';
 
 export type { BounceParams, FlightParams, Vec3 };
 
-/** Which half of the table, split by the net at z = 0. */
-export type TableHalf = 'player' | 'feeder';
+/** Which half of the table, split by the net at z = 0: the player's (+z) or the Opponent's (−z), where the Feeder stands in Return Drill. */
+export type TableHalf = Side;
 
 /** `live` while the rally is on; `dead` after the net; `out` after leaving the table or a double bounce. */
 export type BallStatus = 'live' | 'dead' | 'out';
@@ -290,7 +291,7 @@ function isOverTable(p: Vec3): boolean {
 }
 
 function halfAt(z: number): TableHalf {
-  return z >= 0 ? 'player' : 'feeder';
+  return z >= 0 ? 'player' : 'opponent';
 }
 
 function lerp(a: Vec3, b: Vec3, fraction: number): Vec3 {
