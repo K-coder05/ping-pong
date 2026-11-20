@@ -9,8 +9,8 @@ export default defineConfig({
   base: './',
   build: {
     rollupOptions: {
-      // The game plus the tool pages (dist/latency.html, dist/detection.html; not linked from the game).
-      input: { main: resolve(import.meta.dirname, 'index.html'), latency: resolve(import.meta.dirname, 'latency.html'), detection: resolve(import.meta.dirname, 'detection.html') },
+      // The game plus the tool pages (dist/latency.html, dist/detection.html, dist/physics.html; not linked from the game).
+      input: { main: resolve(import.meta.dirname, 'index.html'), latency: resolve(import.meta.dirname, 'latency.html'), detection: resolve(import.meta.dirname, 'detection.html'), physics: resolve(import.meta.dirname, 'physics.html') },
     },
   },
   test: {
