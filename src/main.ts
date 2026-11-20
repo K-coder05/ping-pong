@@ -1,5 +1,5 @@
 /**
- * Boot and game loop for Return Drill.
+ * Boot and game loop for Return Drill and Matches.
  *
  * The game itself (ball physics, the Feeder, the shot resolver, the Streak)
  * runs in the headless `GameCore` (`game/core.ts`). Each animation frame:
@@ -14,6 +14,15 @@
  * runs Timing calibration if they aren't saved. Swings come only from pose,
  * the Paddle follows the tracked wrist, and the Feeder pauses (with a "Can't
  * see your hand" banner) while the hitting wrist can't be seen.
+ *
+ * After onboarding, the start screen (`render/screens.ts`, spec P2-h2)
+ * offers Return Drill or a Match (Difficulty, 1 Game or best of 3); a Match
+ * with no saved Timing Offset runs Timing calibration first. Each choice
+ * plays a fresh `GameCore` (a session); the last one's listeners are dropped.
+ * When a Match ends, the Game-over screen offers Rematch, Change Difficulty
+ * and Back to start; Esc during play goes back to the start screen. The
+ * developer URL flags (`?mode=`, `?difficulty=`, `?input=mouse`, `?seed=`)
+ * skip the start screen and play as they ask straight after onboarding.
  *
  * `?input=mouse` swaps in the developer mouse for both and skips onboarding:
  * there is no camera to start and no pose latency to calibrate. The mouse
@@ -35,16 +44,16 @@ import {
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './game/constants.ts';
-import { createGameCore, DEFAULT_MATCH_CONFIG, gameModeFromSearch } from './game/core.ts';
+import { createGameCore, DEFAULT_MATCH_CONFIG, type GameCore } from './game/core.ts';
+import type { MatchConfig } from './game/match.ts';
 import { DEBUG_THROWS } from './game/debugThrows.ts';
 import { makeRng, seedFromSearch } from './util/rng.ts';
-import { createBrain } from './opponent/brain.ts';
-import { DIFFICULTIES, difficultyFromSearch } from './opponent/difficulty.ts';
-import { BODY_PARAMS, READY_POSE, followOpponentPlan, planBody, type BodyPlan, type BodyPose } from './opponent/motion.ts';
+import { DEFAULT_DIFFICULTY } from './opponent/difficulty.ts';
+import { BODY_PARAMS, READY_POSE, followOpponentPlan, planBody, type BodyParams, type BodyPlan, type BodyPose } from './opponent/motion.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
-import { onboardingSteps, runOnboarding } from './game/onboarding.ts';
-import { createPlayLogRecorder } from './game/playLog.ts';
+import { matchStartSteps, onboardingSteps, runOnboarding } from './game/onboarding.ts';
+import { createPlayLogRecorder, type PlayLogRecorder } from './game/playLog.ts';
 import { contactPoint, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
@@ -60,6 +69,18 @@ import { createHud } from './render/hud.ts';
 import { matchHud, type HudEvent } from './render/hudModel.ts';
 import { createOnboardingScreens } from './render/onboardingScreens.ts';
 import { createPaddle } from './render/paddle.ts';
+import {
+  coreOptionsFromChoice,
+  createScreens,
+  nextScreen,
+  playingFromSearch,
+  skipsStartScreen,
+  START_SCREEN,
+  watchMatch,
+  type ScreenAction,
+  type ScreenState,
+  type StartChoice,
+} from './render/screens.ts';
 import { createTableScene } from './render/scene.ts';
 import { sharedSensing } from './sensing/shared.ts';
 
@@ -123,98 +144,75 @@ knobs.button({
 });
 
 const onboardingScreens = createOnboardingScreens();
-/** Whether onboarding has finished, so the drill may feed. */
-let drillStarted = false;
-/** Whether Timing calibration is running: its Swings are not for the resolver, and the Feeder waits. */
+/** Whether onboarding has finished. */
+let onboarded = false;
+/** Whether Timing calibration is running: its Swings are not for the resolver, and the game waits. */
 let calibrating = false;
+/** Whether the current session is being played: no screen up, and not calibrating before a Match. */
+let playing = false;
 
-/** Run Timing calibration and use (and, in play, save) the Timing Offset it measures. */
-async function calibrate(cancellable: boolean): Promise<void> {
+/**
+ * Run Timing calibration and use (and, in play, save) the Timing Offset it
+ * measures. Resolves true once measured, false if the player cancelled.
+ */
+async function calibrate(cancellable: boolean): Promise<boolean> {
   calibrating = true;
   try {
     const video = mouse ? null : (await sharedSensing()).video;
     const offsetMs = await onboardingScreens.calibrate({ video, swings, cancellable });
-    if (offsetMs === null) return;
+    if (offsetMs === null) return false;
     TIMING_OFFSET_MS.set(offsetMs); // snapped to the knob's 5 ms grid and clamped to its range
     if (!mouse) timingOffsetStore.save(TIMING_OFFSET_MS.value);
     console.info(`Timing Offset: measured ${offsetMs} ms, using ${TIMING_OFFSET_MS.value} ms`);
+    return true;
   } finally {
     calibrating = false;
   }
 }
 
-/**
- * Onboarding: the steps this player still needs (SPEC "Onboarding for the
- * prototype"), then the drill. Starting the camera lives here, in its first
- * step; if it can't start, the player is told why and can try again.
- */
-const onboardingPlan = onboardingSteps({
-  input: mouseMode ? 'mouse' : 'pose',
-  handSaved: handedness.hand !== null,
-  timingOffsetSaved: timingOffsetStore.offsetMs !== null,
-});
-void runOnboarding(onboardingPlan, {
-  'ask-camera': () => onboardingScreens.askCamera(startCamera),
-  'start-camera': () => onboardingScreens.startCamera(startCamera),
-  framing: async () => onboardingScreens.framing((await sharedSensing()).video),
-  handedness: async () => handedness.set(await askHandedness()),
-  calibration: () => calibrate(false),
-}).then(
-  () => (drillStarted = true),
-  (error: unknown) => console.error('Onboarding failed', error),
-);
-
-knobs.button({
-  name: 'Redo calibration',
-  group: 'Timing',
-  onPress: () => {
-    if (!drillStarted || calibrating) return; // onboarding still running, or already calibrating
-    calibrate(true).catch((error: unknown) => console.error('Calibration failed', error));
-  },
-});
-
-/** Whether the Feeder must wait for the player's hand: never with the mouse. */
+/** Whether the game must wait for the player's hand: never with the mouse. */
 const waitingForHand = (): boolean => !mouse && pose.tracking !== 'tracked';
 /**
  * Whether to show "Can't see your hand": once pose is running, until the wrist
- * is first seen and whenever it is lost, during the drill and calibration
- * (whose Swings also need the wrist tracked).
+ * is first seen and whenever it is lost, during play and calibration (whose
+ * Swings also need the wrist tracked).
  */
 const handLost = (): boolean => !mouse && pose.tracking === 'lost';
-/** Whether the drill is on: onboarding done and not recalibrating. */
-const drilling = (): boolean => drillStarted && !calibrating;
 
 /**
- * Whether the core is paused: no new Feed and no Swings before onboarding
- * finishes, while recalibrating (its Swings are not for the resolver), or
- * while the hand can't be seen; a Feed in flight plays out.
+ * Whether the core is paused: no new Feed or Serve and no Swings outside play
+ * (onboarding, a screen up, calibration: its Swings are not for the resolver)
+ * or while the hand can't be seen; a Feed in flight plays out, and a Rally in
+ * a Match is replayed.
  */
-const corePaused = (): boolean => !drilling() || waitingForHand();
+const corePaused = (): boolean => !playing || calibrating || waitingForHand();
 
 const ballStatus = createBallStatusReadout();
 
-/** Every random draw in the game comes from this one seeded source: `?seed=<n>` replays a session. */
+/**
+ * Every random draw in the game comes from one seeded source: `?seed=<n>`
+ * replays a session. The first session's core draws from `makeRng(seed)`
+ * itself; each later one (a Rematch, a new choice) from its own seed, drawn
+ * in turn from a stream derived from `seed`, and logged so that session can
+ * be replayed as the first one.
+ */
 const seed = seedFromSearch(window.location.search);
 console.log(`[seed] ${seed} (reload with ?seed=${seed} to replay)`);
+const sessionSeeds = makeRng(seed ^ 0x9e3779b9);
+let sessionCount = 0;
+function nextSessionSeed(): number {
+  return sessionCount++ === 0 ? seed : Math.floor(sessionSeeds() * 2 ** 32);
+}
 
-/**
- * The game: the ball in play, the Feeder, the shot resolver and the Streak.
- * `?mode=match` plays Rallies against the Opponent instead of Return Drill, at
- * the Difficulty `?difficulty=novice|intermediate|expert` asks for
- * (Intermediate otherwise); it never changes during the Match.
- */
-const mode = gameModeFromSearch(window.location.search);
-const difficulty = difficultyFromSearch(window.location.search);
-if (mode === 'match') console.log(`[match] Difficulty: ${difficulty} (?difficulty=novice|intermediate|expert)`);
-const core = createGameCore({
-  random: makeRng(seed),
-  resolverParams: knobResolverParams,
-  hand: hittingHand,
-  mode,
-  opponent: createBrain(DIFFICULTIES[difficulty]),
-});
 const sounds = createSounds();
 unlockAudioOnGesture(sounds);
+
+/**
+ * The game: the ball in play, the Feeder, the shot resolver and the Streak,
+ * or a Match against the Opponent at the chosen Difficulty (it never changes
+ * during the Match). A new one for each session (`startSession`).
+ */
+let core: GameCore;
 
 /**
  * The Paddle: drawn for feel, never deciding a Return (ADR 0001). With
@@ -238,54 +236,210 @@ const paddle = createPaddle({
 
 const FEEDBACK: Partial<Record<ShotEvent['type'], string>> = { early: 'Early!', late: 'Late!', miss: 'Miss' };
 
-/**
- * Every resolver event, after the core has acted on it (the Return made the
- * ball in play, the Streak updated): the HUD shows the feedback and Streak;
- * `accepted` starts the Paddle's Swing animation and schedules the contact
- * tock for `contactAtMs`; `contact` (the frame the Return launches) pins the
- * Paddle's contact frame and point. Every table bounce is a bounce tock.
- */
-core.onShot((event) => {
-  const text = event.type === 'off-target' ? (event.reason === 'net' ? 'Net' : 'Out') : FEEDBACK[event.type];
-  if (text) hud.showFeedback(text);
-  hud.showStreak(core.streak.streak, core.streak.best);
-  if (event.type === 'accepted') {
-    paddle.swing({ onsetMs: event.swing.t, contactAtMs: event.contactAtMs, side: event.swing.side });
-    // Scheduled now, so it is heard exactly at the contact moment.
-    sounds.contact(event.contactAtMs);
-  } else if (event.type === 'contact') {
-    paddle.contact(event.atMs, event.position);
-  }
-});
-core.onBounce(() => sounds.bounce());
-
-/** Match HUD: the score row follows the core's Match state; each Point or Let flashes its banner. */
+/** The current session's Match rules (for the HUD) and the Opponent body's Difficulty. */
+let matchConfig: Readonly<MatchConfig> = DEFAULT_MATCH_CONFIG;
+let bodyParams: Readonly<BodyParams> = BODY_PARAMS[DEFAULT_DIFFICULTY];
+/** The latest Match event, for the HUD's banner. */
 let lastMatchEvent: HudEvent | null = null;
-function showMatchHud(): void {
-  if (core.match) hud.showMatch(matchHud(core.match, DEFAULT_MATCH_CONFIG, lastMatchEvent));
-}
-core.onMatch((e) => {
-  lastMatchEvent = e;
-  const banner = e.type === 'next-game' ? null : matchHud(e.match, DEFAULT_MATCH_CONFIG, e).banner;
-  if (banner) hud.showFeedback(banner);
-  if (e.type === 'point' && e.match.phase === 'pre-serve') {
-    const status = matchHud(e.match, DEFAULT_MATCH_CONFIG, null).status;
-    if (status) setTimeout(() => hud.showFeedback(status), 900);
+/** Every session's play log, oldest first: one download holds them all. */
+const playLogs: PlayLogRecorder[] = [];
+/** Stops listening to the current session's core. */
+let endSession: () => void = () => {};
+
+/**
+ * The Opponent's body (Match only): it plays the core's `opponentPlan`, held
+ * through the follow-through after the core clears it at the strike. Purely
+ * cosmetic (ADR 0002): nothing here feeds back into the core.
+ */
+let opponentBodyPlan: BodyPlan | null = null;
+let opponentPose: BodyPose = READY_POSE;
+
+/** How long the last Point's banner shows before the Game-over screen, ms. */
+const GAME_OVER_DELAY_MS = 1800;
+
+/**
+ * Start a session: a fresh core for `choice`, with the Paddle, sounds, HUD,
+ * play log and (in a Match) the Game-over tally following its events. The
+ * last session's listeners are dropped first.
+ */
+function startSession(choice: StartChoice): void {
+  endSession();
+  const sessionSeed = nextSessionSeed();
+  const options = coreOptionsFromChoice(choice);
+  core = createGameCore({ random: makeRng(sessionSeed), resolverParams: knobResolverParams, hand: hittingHand, ...options });
+  const session = core;
+  matchConfig = options.match ?? DEFAULT_MATCH_CONFIG;
+  bodyParams = BODY_PARAMS[choice.mode === 'match' ? choice.difficulty : DEFAULT_DIFFICULTY];
+  lastMatchEvent = null;
+  opponentBodyPlan = null;
+  opponentPose = READY_POSE;
+  if (choice.mode === 'match') {
+    console.log(
+      `[match] ${choice.difficulty}, best of ${choice.bestOf}, seed ${sessionSeed}` +
+        ` (replay a one-Game Match with ?seed=${sessionSeed}&mode=match&difficulty=${choice.difficulty})`,
+    );
+  } else if (sessionCount > 1) {
+    console.log(`[drill] seed ${sessionSeed} (replay with ?seed=${sessionSeed})`);
   }
+
+  const off: (() => void)[] = [];
+  /**
+   * Every resolver event, after the core has acted on it (the Return made the
+   * ball in play, the Streak updated): the HUD shows the feedback and Streak;
+   * `accepted` starts the Paddle's Swing animation and schedules the contact
+   * tock for `contactAtMs`; `contact` (the frame the Return launches) pins the
+   * Paddle's contact frame and point. Every table bounce is a bounce tock.
+   */
+  off.push(
+    session.onShot((event) => {
+      const text = event.type === 'off-target' ? (event.reason === 'net' ? 'Net' : 'Out') : FEEDBACK[event.type];
+      if (text) hud.showFeedback(text);
+      hud.showStreak(session.streak.streak, session.streak.best);
+      if (event.type === 'accepted') {
+        paddle.swing({ onsetMs: event.swing.t, contactAtMs: event.contactAtMs, side: event.swing.side });
+        // Scheduled now, so it is heard exactly at the contact moment.
+        sounds.contact(event.contactAtMs);
+      } else if (event.type === 'contact') {
+        paddle.contact(event.atMs, event.position);
+      }
+    }),
+    session.onBounce(() => sounds.bounce()),
+  );
+
+  /** Match HUD: each Point or Let flashes its banner; the score row follows the core's Match state (`showMatchHud`). */
+  off.push(
+    session.onMatch((e) => {
+      lastMatchEvent = e;
+      const banner = e.type === 'next-game' ? null : matchHud(e.match, matchConfig, e).banner;
+      if (banner) hud.showFeedback(banner);
+      if (e.type === 'point' && e.match.phase === 'pre-serve') {
+        const status = matchHud(e.match, matchConfig, null).status;
+        if (status) setTimeout(() => hud.showFeedback(status), 900);
+      }
+    }),
+  );
+
+  /** The Game-over screen, a moment after the Match's last Point, with this Match's tally. */
+  if (choice.mode === 'match') {
+    const tally = watchMatch(session);
+    off.push(tally.unsubscribe);
+    off.push(
+      session.onMatch((e) => {
+        if (e.type !== 'point' || e.match.phase !== 'match-over') return;
+        setTimeout(() => {
+          const result = tally.stats.result;
+          if (core === session && result) dispatch({ type: 'match-over', result });
+        }, GAME_OVER_DELAY_MS);
+      }),
+    );
+  }
+
+  /** The play log: one entry per Shot coming to the player (fit with `npm run fit-player`). */
+  const playLog = createPlayLogRecorder({ mode: session.mode });
+  playLogs.push(playLog);
+  off.push(
+    session.onIncoming((incoming) => {
+      if (incoming.receiver === 'player') playLog.startFeed(incoming.idealAtMs);
+    }),
+    session.onShot((event) => playLog.shot(event)),
+  );
+
+  hud.showMatch(null);
+  hud.showStreak(session.streak.streak, session.streak.best);
+  endSession = () => off.forEach((unsubscribe) => unsubscribe());
+}
+
+/** Match HUD: the score row follows the current core's Match state, by the session's rules. */
+function showMatchHud(): void {
+  if (core.match) hud.showMatch(matchHud(core.match, matchConfig, lastMatchEvent));
+}
+
+/**
+ * The start and Game-over screens. With a developer URL flag, play starts
+ * as the flags ask once onboarding is done; otherwise the start screen
+ * shows then (an idle Return Drill core waits behind it, never feeding).
+ */
+const screens = createScreens();
+let screen: ScreenState = skipsStartScreen(window.location.search) ? playingFromSearch(window.location.search) : START_SCREEN;
+startSession(screen.screen === 'playing' ? screen.choice : { mode: 'drill' });
+
+/** The player chose on a screen: move to the next one, and start or stop play. */
+function dispatch(action: ScreenAction): void {
+  const previous = screen;
+  screen = nextScreen(previous, action);
+  if (screen === previous) return;
+  screens.show(screen, dispatch);
+  if (screen.screen === 'playing') void play(screen.choice);
+  else playing = false;
+}
+
+/** Bumped by each `play`, so a superseded one (Esc during its calibration) doesn't start. */
+let playRequest = 0;
+
+/**
+ * Play `choice` in a fresh session. A Match with no saved Timing Offset runs
+ * Timing calibration first; cancelling it goes back to the start screen.
+ */
+async function play(choice: StartChoice): Promise<void> {
+  const request = ++playRequest;
+  playing = false;
+  const steps = choice.mode === 'match' ? matchStartSteps({ input: mouseMode ? 'mouse' : 'pose', timingOffsetSaved: timingOffsetStore.offsetMs !== null }) : [];
+  if (steps.includes('calibration') && !(await calibrate(true))) {
+    if (request === playRequest) dispatch({ type: 'back-to-start' });
+    return;
+  }
+  if (request !== playRequest || screen.screen !== 'playing') return;
+  startSession(choice);
+  playing = true;
+}
+
+// Esc during play: back to the start screen (the core pauses; a Rally in progress is void).
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.repeat || !onboarded || calibrating || screen.screen !== 'playing') return;
+  dispatch({ type: 'back-to-start' });
 });
 
-/** The play log: one entry per Shot coming to the player (fit with `npm run fit-player`). */
-const playLog = createPlayLogRecorder({ mode: core.mode });
-core.onIncoming((incoming) => {
-  if (incoming.receiver === 'player') playLog.startFeed(incoming.idealAtMs);
+/**
+ * Onboarding: the steps this player still needs (SPEC "Onboarding for the
+ * prototype"), then the start screen (or play, with a developer flag).
+ * Starting the camera lives here, in its first step; if it can't start, the
+ * player is told why and can try again.
+ */
+const onboardingPlan = onboardingSteps({
+  input: mouseMode ? 'mouse' : 'pose',
+  handSaved: handedness.hand !== null,
+  timingOffsetSaved: timingOffsetStore.offsetMs !== null,
 });
-core.onShot((event) => playLog.shot(event));
+void runOnboarding(onboardingPlan, {
+  'ask-camera': () => onboardingScreens.askCamera(startCamera),
+  'start-camera': () => onboardingScreens.startCamera(startCamera),
+  framing: async () => onboardingScreens.framing((await sharedSensing()).video),
+  handedness: async () => handedness.set(await askHandedness()),
+  calibration: async () => void (await calibrate(false)),
+}).then(
+  () => {
+    onboarded = true;
+    if (screen.screen === 'playing') playing = true; // the developer flags' session, already made
+    else screens.show(screen, dispatch);
+  },
+  (error: unknown) => console.error('Onboarding failed', error),
+);
+
+knobs.button({
+  name: 'Redo calibration',
+  group: 'Timing',
+  onPress: () => {
+    if (!onboarded || calibrating) return; // onboarding still running, or already calibrating
+    calibrate(true).catch((error: unknown) => console.error('Calibration failed', error));
+  },
+});
+
 knobs.button({
   name: 'Download play log',
   group: 'Debug',
   onPress: () => {
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([playLog.toText()], { type: 'application/x-ndjson' }));
+    link.href = URL.createObjectURL(new Blob([playLogs.map((log) => log.toText()).join('')], { type: 'application/x-ndjson' }));
     link.download = `play-log-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`;
     link.click();
     URL.revokeObjectURL(link.href);
@@ -295,11 +449,10 @@ knobs.button({
 swings.subscribe((swing) => {
   // Pose emits Swings only while the wrist is tracked, which may be newer
   // than the last frame's pause: refresh it first, so the Swing is judged
-  // exactly when the drill is on.
+  // exactly when play is on.
   core.setPaused(corePaused());
   core.swing(swing, performance.now());
 });
-hud.showStreak(core.streak.streak, core.streak.best);
 
 knobs.button({ name: 'Drop ball (30 cm)', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.drop()) });
 knobs.button({ name: 'Throw into net', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.intoNet()) });
@@ -324,19 +477,11 @@ function idealTimeMarker() {
   return { position: ideal.position, reached: sinceFeed >= ideal.simSeconds };
 }
 
-/**
- * The Opponent's body (Match only): it plays the core's `opponentPlan`, held
- * through the follow-through after the core clears it at the strike. Purely
- * cosmetic (ADR 0002): nothing here feeds back into the core.
- */
-let opponentBodyPlan: BodyPlan | null = null;
-let opponentPose: BodyPose = READY_POSE;
-
-/** One frame of the Opponent's body: simulated time runs at TIME_SCALE, capped like the core's. */
+/** One frame of the Opponent's body (see `opponentBodyPlan`): simulated time runs at TIME_SCALE, capped like the core's. */
 function updateOpponentBody(nowMs: number, elapsedSeconds: number): BodyPose {
   const timeScale = TIME_SCALE.value;
   opponentBodyPlan = followOpponentPlan(core.opponentPlan, opponentBodyPlan, (incoming) => ((nowMs - incoming.launchedAtMs) / 1000) * timeScale);
-  opponentPose = planBody(opponentPose, opponentBodyPlan, Math.min(elapsedSeconds, MAX_FRAME_DT) * timeScale, BODY_PARAMS[difficulty]);
+  opponentPose = planBody(opponentPose, opponentBodyPlan, Math.min(elapsedSeconds, MAX_FRAME_DT) * timeScale, bodyParams);
   return opponentPose;
 }
 
@@ -359,7 +504,7 @@ function frame(now: number): void {
   // pause only stops new Feeds and Swings, so setting it first is the same as
   // setting it between the resolver and the Feeder.
   core.setPaused(corePaused());
-  hud.showHandLost((drilling() || calibrating) && handLost());
+  hud.showHandLost((playing || calibrating) && handLost());
   core.frame({ nowMs: now, elapsedSeconds });
   hud.showCountdown(core.countdown);
   showMatchHud();

@@ -1,7 +1,7 @@
 /**
  * Onboarding (SPEC "Onboarding for the prototype"): what a player goes
- * through before the Return Drill starts. A first-time player gets four
- * steps, in order:
+ * through before the start screen (or, with a developer URL flag, before
+ * play starts). A first-time player gets four steps, in order:
  *
  * 1. `ask-camera`: camera permission, with a line that video stays on the device.
  * 2. `framing`: "Stand back until your whole swing fits in the picture." over the mirrored video.
@@ -12,6 +12,9 @@
  * on, so it starts without asking (`start-camera`). With the developer mouse
  * (`?input=mouse`) there is no camera to start and no pose latency to
  * calibrate, so there is no onboarding.
+ *
+ * Starting a Match from the start screen (spec P2-h2) needs a Timing Offset:
+ * with none saved, Timing calibration runs first (`matchStartSteps`).
  *
  * This module only plans and sequences the steps; the screens are in
  * `render/onboardingScreens.ts`.
@@ -30,6 +33,15 @@ export function onboardingSteps({ input, handSaved, timingOffsetSaved }: Onboard
   if (input === 'mouse') return [];
   if (handSaved && timingOffsetSaved) return ['start-camera'];
   return ['ask-camera', 'framing', ...(handSaved ? [] : ['handedness' as const]), ...(timingOffsetSaved ? [] : ['calibration' as const])];
+}
+
+/**
+ * The steps before a Match starts from the start screen: Timing calibration
+ * if no Timing Offset is saved (never with the developer mouse, which has no
+ * pose latency to calibrate). Return Drill starts straight away.
+ */
+export function matchStartSteps({ input, timingOffsetSaved }: Omit<OnboardingState, 'handSaved'>): OnboardingStep[] {
+  return input === 'pose' && !timingOffsetSaved ? ['calibration'] : [];
 }
 
 /**

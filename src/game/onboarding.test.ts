@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cameraErrorMessage, onboardingSteps, runOnboarding, type OnboardingStep } from './onboarding.ts';
+import { cameraErrorMessage, matchStartSteps, onboardingSteps, runOnboarding, type OnboardingStep } from './onboarding.ts';
 
 describe('onboardingSteps', () => {
   it('takes a first-time player through camera, framing, handedness and Timing calibration, in order', () => {
@@ -30,6 +30,17 @@ describe('onboardingSteps', () => {
 
   it('skips onboarding with the developer mouse', () => {
     expect(onboardingSteps({ input: 'mouse', handSaved: false, timingOffsetSaved: false })).toEqual([]);
+  });
+});
+
+describe('matchStartSteps', () => {
+  it('runs Timing calibration first when a Match starts with no Timing Offset saved', () => {
+    expect(matchStartSteps({ input: 'pose', timingOffsetSaved: false })).toEqual(['calibration']);
+  });
+
+  it('starts the Match straight away once a Timing Offset is saved, or with the developer mouse', () => {
+    expect(matchStartSteps({ input: 'pose', timingOffsetSaved: true })).toEqual([]);
+    expect(matchStartSteps({ input: 'mouse', timingOffsetSaved: false })).toEqual([]);
   });
 });
 
