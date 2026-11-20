@@ -328,7 +328,7 @@ function frame(now: number): void {
 
   debug.update(elapsedSeconds);
   ballStatus.update(ball, debug.active);
-  tableScene.syncBall(ball.position);
+  tableScene.syncBall(ball.position, ball.spin);
   tableScene.syncPaddle(paddle.update(now, handPositions.latest));
   tableScene.syncIdealTimeMarker(idealTimeMarker());
   tableScene.render(debug.camera);

@@ -75,7 +75,7 @@ const KINDS: readonly ShotKind[] = [
 const canvas = document.querySelector<HTMLCanvasElement>('#view')!;
 const tableScene = createTableScene(canvas);
 const { scene } = tableScene;
-tableScene.syncBall({ x: 0, y: -10, z: 0 }); // the game's own ball and its shadow stay out of sight
+tableScene.syncBall({ x: 0, y: -10, z: 0 }, { x: 0, y: 0, z: 0 }); // the game's own ball and its shadow stay out of sight
 tableScene.syncPaddle({ position: { x: 0, y: -10, z: 0 }, yaw: 0, pitch: 0, backhandFace: false });
 
 // Cameras: side and top are fixed; orbit is free.

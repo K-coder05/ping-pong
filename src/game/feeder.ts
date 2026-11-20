@@ -29,6 +29,8 @@ import {
   FEED_FLIGHT_TIME_S,
   FEED_MAX_DRAWS,
   FEED_PAUSE_S,
+  FEED_SPIN_MAX_REVS,
+  FEED_SPIN_STEP_REVS,
   FEED_SPEEDUP_EVERY,
   FEED_SPEEDUP_FACTOR,
   FEED_TARGET_HALF_WIDTH,
@@ -42,6 +44,7 @@ import {
   TIME_SCALE,
   TIMING_OFFSET_MS,
 } from './constants.ts';
+import { revsToRadPerSec } from '../physics/spin.ts';
 import { simSecondsToRealMs } from './simClock.ts';
 import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type TablePoint } from './solver.ts';
 
@@ -97,6 +100,8 @@ export interface Feed {
    * timing, use `idealTime`.
    */
   readonly flightTime: number;
+  /** The Topspin it was drawn with (rad/s); negative is Backspin. Zero for the fallback Feed. */
+  readonly topspin: number;
   /**
    * When and where it reaches the player's end. A draw without one is redrawn,
    * so this is null only if even the centre fallback has none (never at the
@@ -189,7 +194,8 @@ export function createFeeder(options: FeederOptions): Feeder {
   function launch(nowMs: number): void {
     const speedUps = Math.floor(streak / FEED_SPEEDUP_EVERY);
     const flightTime = FEED_FLIGHT_TIME_S.value * FEED_SPEEDUP_FACTOR ** speedUps;
-    const feed = planFeed(random, solve, flightTime, nowMs);
+    const maxTopspin = revsToRadPerSec(Math.min(speedUps * FEED_SPIN_STEP_REVS.value, FEED_SPIN_MAX_REVS.value));
+    const feed = planFeed(random, solve, flightTime, maxTopspin, nowMs);
     phase = 'feeding';
     currentFeed = feed;
     simSecondsSinceFeed = 0;
@@ -279,31 +285,34 @@ function hitWindowIsOpen(feed: Feed | null, nowMs: number): boolean {
 }
 
 /**
- * A Feed to a random spot on the player's half, solved for `flightTime` and
+ * A Feed to a random spot on the player's half, with a Topspin drawn
+ * uniformly from ±`maxTopspin` (rad/s), solved for `flightTime` and
  * launched at `nowMs`. A draw the solver can't solve, or whose Feed would
  * never reach the player (no Ideal Time), is redrawn with the same `random`;
  * after FEED_MAX_DRAWS failed draws, the Feed goes to the centre of the
  * target area with no spin, solved best-effort. Each Feed launches with the
  * solution's spin and its own seed (for the Net-cord), drawn from `random`.
  */
-function planFeed(random: () => number, solve: ShotSolver, flightTime: number, nowMs: number): Feed {
+function planFeed(random: () => number, solve: ShotSolver, flightTime: number, maxTopspin: number, nowMs: number): Feed {
   for (let draw = 0; draw < FEED_MAX_DRAWS; draw++) {
     const target = {
       x: (2 * random() - 1) * FEED_TARGET_HALF_WIDTH,
       z: FEED_TARGET_Z_MIN + random() * (FEED_TARGET_Z_MAX - FEED_TARGET_Z_MIN),
     };
-    const intent: ShotIntent = { target, flightTime, topspin: 0, sidespin: 0 };
+    // No spin to draw, no random consumed: a spinless Feed's draws are the same as before spin existed.
+    const topspin = maxTopspin > 0 ? (2 * random() - 1) * maxTopspin : 0;
+    const intent: ShotIntent = { target, flightTime, topspin, sidespin: 0 };
     const solution = solve(FEEDER_MOUTH, intent);
     if (!solution) continue;
-    const feed = launchFeed(random, target, solution, nowMs);
+    const feed = launchFeed(random, target, topspin, solution, nowMs);
     if (feed.idealTime) return feed;
   }
   const centre: ShotIntent = { target: { x: 0, z: (FEED_TARGET_Z_MIN + FEED_TARGET_Z_MAX) / 2 }, flightTime, topspin: 0, sidespin: 0 };
-  return launchFeed(random, centre.target, solve(FEEDER_MOUTH, centre, { bestEffort: true }), nowMs);
+  return launchFeed(random, centre.target, 0, solve(FEEDER_MOUTH, centre, { bestEffort: true }), nowMs);
 }
 
 /** Launch a solved Feed with its own seed, and look ahead for its Ideal Time. */
-function launchFeed(random: () => number, target: TablePoint, solution: ShotSolution, nowMs: number): Feed {
+function launchFeed(random: () => number, target: TablePoint, topspin: number, solution: ShotSolution, nowMs: number): Feed {
   const seed = Math.floor(random() * 2 ** 32);
   const ball = launchBall(FEEDER_MOUTH, solution.velocity, solution.spin, seed);
   const idealTime = findIdealTime(ball);
@@ -311,6 +320,7 @@ function launchFeed(random: () => number, target: TablePoint, solution: ShotSolu
     ball,
     target,
     flightTime: solution.flightTime,
+    topspin,
     idealTime,
     launchedAtMs: nowMs,
     idealAtMs: idealTime ? nowMs + simSecondsToRealMs(idealTime.simSeconds, TIME_SCALE.value) : null,

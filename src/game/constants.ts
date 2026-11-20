@@ -177,6 +177,15 @@ export const FEED_PAUSE_S = knobs.number({ name: 'FEED_PAUSE_S', min: 0, max: 5,
 export const FEED_COUNTDOWN_STEP_S = knobs.number({ name: 'FEED_COUNTDOWN_STEP_S', min: 0.2, max: 1.5, step: 0.05, default: 0.5, group: 'Feeder' });
 
 /**
+ * A Feed's Topspin (or Backspin) grows by this many rev/s with each Streak
+ * speed-up (every FEED_SPEEDUP_EVERY Returns), up to FEED_SPIN_MAX_REVS. Each
+ * Feed draws its spin uniformly from ± that; 0 means Feeds never spin.
+ */
+export const FEED_SPIN_STEP_REVS = knobs.number({ name: 'FEED_SPIN_STEP_REVS', min: 0, max: 40, step: 1, default: 10, group: 'Feeder' });
+/** The most Topspin or Backspin (rev/s) any Feed carries, however long the Streak. */
+export const FEED_SPIN_MAX_REVS = knobs.number({ name: 'FEED_SPIN_MAX_REVS', min: 0, max: 80, step: 1, default: 40, group: 'Feeder' });
+
+/**
  * Ball–table friction coefficient µ in the spin-aware table bounce
  * (`physics/bounce.ts`): how much of the contact point's slip a bounce trades
  * between speed and Spin. 0.25 from Sony AI's 2026 table tennis physics paper
@@ -241,6 +250,12 @@ export const TRACKING_FOUND_FRAMES = knobs.number({ name: 'TRACKING_FOUND_FRAMES
 
 /** Ball drawn this many times its physics radius, so it's readable from 2 m. */
 export const BALL_DRAW_SCALE = knobs.number({ name: 'BALL_DRAW_SCALE', min: 1, max: 4, step: 0.1, default: 2, group: 'Render' });
+/**
+ * The fastest the ball's stripe turns on screen (rev/s), approached as real
+ * spin grows. Real rates (20-80 rev/s) would alias at 60 FPS, so the drawn
+ * rate is a slow, monotonic stand-in.
+ */
+export const SPIN_DRAW_MAX_REVS = knobs.number({ name: 'SPIN_DRAW_MAX_REVS', min: 0, max: 8, step: 0.5, default: 4, group: 'Render' });
 /** Debug marker where (and, by lighting up, when) each Feed reaches its Ideal Time. */
 export const SHOW_IDEAL_TIME_MARKER = knobs.toggle({ name: 'SHOW_IDEAL_TIME_MARKER', default: true, group: 'Render' });
 

@@ -5,6 +5,9 @@ import {
   BALL_RADIUS,
   FEED_FLIGHT_TIME_S,
   FEED_MAX_DRAWS,
+  FEED_SPEEDUP_EVERY,
+  FEED_SPIN_MAX_REVS,
+  FEED_SPIN_STEP_REVS,
   FEED_TARGET_HALF_WIDTH,
   FEED_TARGET_Z_MAX,
   FEED_TARGET_Z_MIN,
@@ -17,6 +20,7 @@ import {
   TIMING_OFFSET_MS,
 } from './constants.ts';
 import { createFeeder, findIdealTime, type Feed, type Feeder } from './feeder.ts';
+import { revsToRadPerSec } from '../physics/spin.ts';
 import { createSimClock } from './simClock.ts';
 import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type SolveOptions } from './solver.ts';
 
@@ -538,5 +542,110 @@ describe('Feed launch', () => {
     const first = seeds(7);
     expect(new Set(first).size).toBe(3);
     expect(seeds(7)).toEqual(first);
+  });
+});
+
+/** Launch `count` Feeds from a Feeder at `streak`, ending each rally at once. */
+function feedsAt(streak: number, count: number, seed: number, solve?: ShotSolver): Feed[] {
+  const feeder = createFeeder({ random: makeRng(seed), solve });
+  feeder.setStreak(streak);
+  const feeds: Feed[] = [];
+  feeder.onFeed((feed) => feeds.push(feed));
+  const game = driver(feeder);
+  while (feeds.length < count) {
+    game.setBall(OUT_BALL);
+    game.run(0.05);
+  }
+  return feeds;
+}
+
+/** The Topspin (rad/s) a launched Feed carries, read back from its spin vector: it is about the axis up × (horizontal direction). */
+function launchedTopspin(feed: Feed): number {
+  const { x: vx, z: vz } = feed.ball.velocity;
+  const horizontal = Math.hypot(vx, vz);
+  const dx = vx / horizontal;
+  const dz = vz / horizontal;
+  // spin = up × d · topspin = (dz, 0, -dx) · topspin
+  return feed.ball.spin.x * dz - feed.ball.spin.z * dx;
+}
+
+describe('Feed spin', () => {
+  it('is zero for every Feed while the Streak is below FEED_SPEEDUP_EVERY', () => {
+    for (const feed of feedsAt(FEED_SPEEDUP_EVERY - 1, 20, 3)) {
+      expect(feed.topspin).toBe(0);
+      expect(feed.ball.spin).toEqual({ x: 0, y: 0, z: 0 });
+    }
+  });
+
+  it.each([1, 2, 3, 5])('after %i speed-ups stays within ±min(n·step, max) of Topspin, and both signs occur', (n) => {
+    const limit = revsToRadPerSec(Math.min(n * FEED_SPIN_STEP_REVS.value, FEED_SPIN_MAX_REVS.value));
+    const feeds = feedsAt(n * FEED_SPEEDUP_EVERY, 40, 11);
+    for (const feed of feeds) {
+      expect(Math.abs(feed.topspin)).toBeLessThanOrEqual(limit);
+      // The launched ball really carries it (the solver's spin vector, no Sidespin).
+      expect(launchedTopspin(feed)).toBeCloseTo(feed.topspin, 6);
+      expect(feed.ball.spin.y).toBeCloseTo(0, 9);
+    }
+    expect(feeds.some((f) => f.topspin > 0)).toBe(true);
+    expect(feeds.some((f) => f.topspin < 0)).toBe(true);
+  });
+
+  it('is capped at FEED_SPIN_MAX_REVS however long the Streak', () => {
+    const limit = revsToRadPerSec(FEED_SPIN_MAX_REVS.default);
+    const feeds = feedsAt(200, 30, 5);
+    expect(Math.max(...feeds.map((f) => Math.abs(f.topspin)))).toBeLessThanOrEqual(limit);
+    expect(Math.max(...feeds.map((f) => Math.abs(f.topspin)))).toBeGreaterThan(limit * 0.5);
+  });
+
+  it('redraws spin along with the target after a failed draw, from the same random', () => {
+    const { solve, calls } = stubSolver((call) => call === 1);
+    const feeds = feedsAt(3 * FEED_SPEEDUP_EVERY, 1, 2, solve);
+    expect(calls[0]!.intent.topspin).not.toBe(calls[1]!.intent.topspin);
+    expect(calls[0]!.intent.target).not.toEqual(calls[1]!.intent.target);
+    expect(feeds[0]!.topspin).toBe(calls[1]!.intent.topspin);
+  });
+
+  it('falls back to zero spin at the centre when every draw fails, even with spin enabled', () => {
+    const { solve, calls } = stubSolver(() => true);
+    const [feed] = feedsAt(3 * FEED_SPEEDUP_EVERY, 1, 2, solve);
+    expect(calls[FEED_MAX_DRAWS]!.intent).toMatchObject({ target: CENTRE, topspin: 0, sidespin: 0 });
+    expect(feed!.topspin).toBe(0);
+  });
+
+  it('leaves a spinless Feed’s random draws as they were (target, then seed)', () => {
+    const draws = [0.5, 0.5, 0.25];
+    const feed = firstFeed(createFeeder({ random: () => draws.shift() ?? 0 }));
+    expect(feed.ball.seed).toBe(Math.floor(0.25 * 2 ** 32));
+  });
+});
+
+describe('Feeds with spin always reach the player', () => {
+  // Extremes of the spin knobs (max spin both ways is reached at the top of the range) and of the flight time.
+  const cases = [
+    { step: 40, max: 80, flight: FEED_FLIGHT_TIME_S.min },
+    { step: 40, max: 80, flight: FEED_FLIGHT_TIME_S.max },
+    { step: 40, max: 80, flight: FEED_FLIGHT_TIME_S.default },
+    { step: FEED_SPIN_STEP_REVS.default, max: FEED_SPIN_MAX_REVS.default, flight: FEED_FLIGHT_TIME_S.default },
+    { step: 0, max: 80, flight: FEED_FLIGHT_TIME_S.default },
+    { step: 40, max: 0, flight: FEED_FLIGHT_TIME_S.min },
+  ];
+  it.each(cases)('step $step, max $max, flight $flight: every Feed has an Ideal Time, over many seeds', ({ step, max, flight }) => {
+    FEED_SPIN_STEP_REVS.set(step);
+    FEED_SPIN_MAX_REVS.set(max);
+    FEED_FLIGHT_TIME_S.set(flight);
+    try {
+      let best = 0;
+      for (let seed = 1; seed <= 12; seed++) {
+        for (const feed of feedsAt(4 * FEED_SPEEDUP_EVERY, 8, seed)) {
+          expect(feed.idealTime, `seed ${seed}`).not.toBeNull();
+          best = Math.max(best, Math.abs(feed.topspin));
+        }
+      }
+      expect(best).toBeLessThanOrEqual(revsToRadPerSec(Math.min(4 * step, max)));
+    } finally {
+      FEED_SPIN_STEP_REVS.reset();
+      FEED_SPIN_MAX_REVS.reset();
+      FEED_FLIGHT_TIME_S.reset();
+    }
   });
 });

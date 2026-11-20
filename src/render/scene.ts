@@ -13,9 +13,12 @@ import {
   MeshStandardMaterial,
   PerspectiveCamera,
   PlaneGeometry,
+  Quaternion,
   RingGeometry,
   Scene,
   SphereGeometry,
+  TorusGeometry,
+  Vector3,
   WebGLRenderer,
 } from 'three';
 import {
@@ -27,12 +30,13 @@ import {
   PLAY_CAMERA_FOV,
   PLAY_CAMERA_POSITION,
   PLAY_CAMERA_TARGET,
+  SPIN_DRAW_MAX_REVS,
   TABLE_LENGTH,
   TABLE_THICKNESS,
   TABLE_TOP_Y,
   TABLE_WIDTH,
 } from '../game/constants.ts';
-import { drawnBall } from './drawnBall.ts';
+import { drawnBall, drawnSpinRate } from './drawnBall.ts';
 import { PADDLE_BLADE_THICKNESS, type PaddlePose } from './paddle.ts';
 
 export interface Vec3Like {
@@ -49,8 +53,11 @@ export interface TableScene {
   /**
    * Draw the ball at its physics centre, using the live BALL_DRAW_SCALE, with
    * a dark shadow dropped straight down onto the table (or the floor, off it).
+   * The ball's stripe turns about the true `spin` axis (rad/s) at the drawn
+   * rate (`drawnSpinRate`), so Topspin and Backspin can be told apart; no
+   * spin, no turning.
    */
-  syncBall(position: Vec3Like): void;
+  syncBall(position: Vec3Like, spin: Vec3Like): void;
   /**
    * The debug Ideal Time marker: a ring where the Feed will cross the player's
    * end, lit up once it has (`reached`). Null hides it.
@@ -82,6 +89,12 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
   scene.add(createFloor(), createTable(), createNet(), createFeeder());
 
   const ball = createBall();
+  // The ball's orientation: its stripe's turning axis (local y) laid along the spin axis, then turned by `ballAngle`.
+  const spinAxis = new Quaternion();
+  const turn = new Quaternion();
+  const axis = new Vector3(0, 1, 0);
+  let ballAngle = 0;
+  let lastSyncMs: number | null = null;
   const shadow = createBallShadow();
   const idealMarker = createIdealTimeMarker();
   const paddle = createPaddle();
@@ -95,7 +108,18 @@ export function createTableScene(canvas: HTMLCanvasElement): TableScene {
     renderer,
     scene,
     playCamera,
-    syncBall(position) {
+    syncBall(position, spin) {
+      const nowMs = performance.now();
+      const dt = lastSyncMs === null ? 0 : Math.min((nowMs - lastSyncMs) / 1000, 0.1);
+      lastSyncMs = nowMs;
+      const rate = drawnSpinRate(spin, SPIN_DRAW_MAX_REVS.value);
+      if (rate > 0) {
+        axis.set(spin.x, spin.y, spin.z).normalize();
+        spinAxis.setFromUnitVectors(UP, axis);
+        ballAngle = (ballAngle + 2 * Math.PI * rate * dt) % (2 * Math.PI);
+      }
+      ball.quaternion.copy(spinAxis).multiply(turn.setFromAxisAngle(UP, ballAngle));
+
       const scale = BALL_DRAW_SCALE.value;
       ball.scale.setScalar(scale);
       const { centre } = drawnBall(position, scale);
@@ -205,11 +229,20 @@ function createNet(): Group {
   return net;
 }
 
+const UP = new Vector3(0, 1, 0);
+
+/**
+ * The ball, with a white stripe: a ring through the poles around local y. A
+ * ring around the spin axis would look the same however it turned, so the
+ * stripe runs along the axis and sweeps round it as the ball spins.
+ */
 function createBall(): Mesh {
-  return new Mesh(
+  const ball = new Mesh(
     new SphereGeometry(BALL_RADIUS, 32, 16),
     new MeshStandardMaterial({ color: 0xff8a1f, roughness: 0.4, emissive: 0x331500 }),
   );
+  ball.add(new Mesh(new TorusGeometry(BALL_RADIUS, BALL_RADIUS * 0.2, 8, 32), new MeshBasicMaterial({ color: 0xffffff })));
+  return ball;
 }
 
 /** A dark disc the size of the physics ball (scaled with it), lying flat. */
