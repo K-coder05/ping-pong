@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { SwingEvent } from '../input/types.ts';
 import type { Hand } from '../sensing/landmarks.ts';
-import { launchBall, stepBall, type BallEvent, type BallState } from './ball.ts';
-import { BALL_RADIUS, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
+import { launchBall, simulate, stepBall, type BallEvent, type BallState, type Vec3 } from './ball.ts';
+import { BALL_RADIUS, FEEDER_END_Z, FEEDER_MOUTH, PLAYER_END_Z, TABLE_TOP_Y, TIMING_OFFSET_MS } from './constants.ts';
 import { findIdealTime } from './feeder.ts';
-import { createShotResolver, feedResult, judgeSwingTiming, knobResolverParams, planReturn, type ResolverParams, type ShotEvent } from './shotResolver.ts';
-import { solveLaunch } from './solver.ts';
+import {
+  createShotResolver,
+  feedResult,
+  judgeSwingTiming,
+  knobResolverParams,
+  planReturn,
+  solveReturn,
+  type ResolverParams,
+  type ShotEvent,
+} from './shotResolver.ts';
+import { solveShot, type ShotIntent, type ShotSolver, type SolveOptions } from './solver.ts';
 
 /** SPEC "Shot resolver and target solver" starting values. */
 const SPEC: ResolverParams = {
@@ -152,7 +161,7 @@ const SUBSTEPS_PER_FRAME = 4; // 4 × 1/240 s
 
 /** A Feed to (x, z) on the player's half, launched at t = 0 ms. */
 function makeFeed(target = { x: 0.2, z: 0.7 }) {
-  const { velocity } = solveLaunch(FEEDER_MOUTH, target, 1.0);
+  const { velocity } = solveShot(FEEDER_MOUTH, { target, flightTime: 1.0, topspin: 0, sidespin: 0 })!;
   const ball = launchBall(FEEDER_MOUTH, velocity);
   const ideal = findIdealTime(ball)!;
   return { ball, idealAtMs: ideal.simSeconds * 1000 };
@@ -177,9 +186,15 @@ function playFeed(options: {
   hand?: Hand;
   untilMs?: number;
   feedTarget?: { x: number; z: number };
+  solve?: ShotSolver;
 }): PlayedFeed {
   const feed = makeFeed(options.feedTarget);
-  const resolver = createShotResolver({ params: () => ({ ...SPEC, ...options.params }), hand: () => options.hand ?? 'right', random: noScatter });
+  const resolver = createShotResolver({
+    params: () => ({ ...SPEC, ...options.params }),
+    hand: () => options.hand ?? 'right',
+    random: noScatter,
+    solve: options.solve,
+  });
   resolver.startFeed(feed);
   let ball: BallState = feed.ball;
   const pending = [...(options.swingsAtMs ?? [])];
@@ -313,6 +328,93 @@ describe('a struck ball that misses', () => {
     const played = playFeed({ swingsAtMs: [idealAtMs - 200], swing: { peakSpeed: 8 } });
     expect(types(played)).toEqual(['accepted', 'contact', 'off-target']);
     expect(played.events[2]).toMatchObject({ reason: 'out' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Solver failure (spec P1-c, ADR 0001): the planned target never moves
+// ---------------------------------------------------------------------------
+
+interface SolveCall {
+  intent: ShotIntent;
+  opts: Partial<SolveOptions> | undefined;
+}
+
+/** A stand-in solver that records its calls and fails every one it may (all but best effort, which it solves for real). */
+function failingSolver(failsFor: (intent: ShotIntent) => boolean = () => true) {
+  const calls: SolveCall[] = [];
+  const solve = ((from: Vec3, intent: ShotIntent, opts?: Partial<SolveOptions>) => {
+    calls.push({ intent, opts });
+    if (!opts?.bestEffort && failsFor(intent)) return null;
+    return solveShot(from, intent, opts);
+  }) as ShotSolver;
+  return { solve, calls };
+}
+
+/** Where a launched ball first comes down to table-contact height, and whether it bounced on the table to get there. */
+function firstLanding(ball: BallState) {
+  const run = simulate(ball, {
+    maxTime: 5,
+    until: (state, _time, events) => events.some((e) => e.type === 'bounce') || (state.velocity.y < 0 && state.position.y <= TABLE_TOP_Y + BALL_RADIUS),
+  });
+  const bounce = run.events.find((e) => e.event.type === 'bounce');
+  return { position: bounce ? bounce.event.position : run.state.position, bounced: bounce !== undefined };
+}
+
+describe('a Return the solver cannot solve', () => {
+  it('still goes long when it was planned long: same target, launched best-effort', () => {
+    const { solve, calls } = failingSolver();
+    const { idealAtMs } = makeFeed();
+    const played = playFeed({ swingsAtMs: [idealAtMs - 200], swing: { peakSpeed: 8 }, solve });
+    expect(types(played)).toEqual(['accepted', 'contact', 'off-target']);
+    expect(played.events[2]).toMatchObject({ reason: 'out' });
+
+    const contact = played.events[1] as Extract<ShotEvent, { type: 'contact' }>;
+    const planned = contact.plan.target;
+    expect(planned.z).toBeLessThan(FEEDER_END_Z); // planned past the Feeder's end line
+    // The zero-spin intent is solved, then solved best-effort: never for another target.
+    expect(calls.map((c) => c.opts?.bestEffort ?? false)).toEqual([false, true]);
+    for (const { intent } of calls) expect(intent.target).toEqual(planned);
+
+    const landing = firstLanding(contact.ball);
+    expect(landing.bounced).toBe(false);
+    expect(landing.position.z).toBeLessThan(FEEDER_END_Z);
+    expect(Math.hypot(landing.position.x - planned.x, landing.position.z - planned.z)).toBeLessThan(0.02);
+  });
+
+  it('launches with a per-Shot seed drawn from the injected random', () => {
+    const { idealAtMs } = makeFeed();
+    const played = playFeed({ swingsAtMs: [idealAtMs] });
+    const contact = played.events[1] as Extract<ShotEvent, { type: 'contact' }>;
+    expect(contact.ball.seed).toBe(Math.floor(noScatter() * 2 ** 32));
+    expect(contact.ball.spin).toEqual({ x: 0, y: 0, z: 0 });
+  });
+});
+
+describe('solveReturn', () => {
+  const from = { x: 0.1, y: TABLE_TOP_Y + 0.3, z: PLAYER_END_Z };
+  const spun: ShotIntent = { target: { x: -0.3, z: -0.8 }, flightTime: 0.8, topspin: 200, sidespin: 50 };
+
+  it('uses the solution when the solver succeeds', () => {
+    const { solve, calls } = failingSolver(() => false);
+    expect(solveReturn(solve, from, spun)).toEqual(solveShot(from, spun));
+    expect(calls).toHaveLength(1);
+  });
+
+  it('retries the same target with no spin when the spun Shot fails', () => {
+    const { solve, calls } = failingSolver((intent) => intent.topspin !== 0);
+    const solution = solveReturn(solve, from, spun);
+    expect(solution.spin).toEqual({ x: 0, y: 0, z: 0 });
+    expect(calls.map((c) => c.intent)).toEqual([spun, { ...spun, topspin: 0, sidespin: 0 }]);
+  });
+
+  it('then launches the zero-spin best effort, still for the same target', () => {
+    const { solve, calls } = failingSolver();
+    const solution = solveReturn(solve, from, spun);
+    expect(solution).not.toBeNull();
+    expect(calls.map((c) => c.opts?.bestEffort ?? false)).toEqual([false, false, true]);
+    for (const { intent } of calls) expect(intent.target).toEqual(spun.target);
+    expect(calls[2]!.intent).toMatchObject({ topspin: 0, sidespin: 0 });
   });
 });
 

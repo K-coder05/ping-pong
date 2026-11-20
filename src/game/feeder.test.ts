@@ -1,13 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { launchBall, stepBall, type BallEvent, type BallState } from './ball.ts';
-import { BALL_RADIUS, FEED_FLIGHT_TIME_S, FEEDER_MOUTH, HIT_WINDOW_MS, PHYSICS_DT, PLAYER_END_Z, TABLE_TOP_Y, TIME_SCALE, TIMING_OFFSET_MS } from './constants.ts';
+import { launchBall, stepBall, type BallEvent, type BallState, type Vec3 } from './ball.ts';
+import { makeRng } from '../util/rng.ts';
+import {
+  BALL_RADIUS,
+  FEED_FLIGHT_TIME_S,
+  FEED_MAX_DRAWS,
+  FEED_TARGET_HALF_WIDTH,
+  FEED_TARGET_Z_MAX,
+  FEED_TARGET_Z_MIN,
+  FEEDER_MOUTH,
+  HIT_WINDOW_MS,
+  PHYSICS_DT,
+  PLAYER_END_Z,
+  TABLE_TOP_Y,
+  TIME_SCALE,
+  TIMING_OFFSET_MS,
+} from './constants.ts';
 import { createFeeder, findIdealTime, type Feed, type Feeder } from './feeder.ts';
 import { createSimClock } from './simClock.ts';
-import { solveLaunch } from './solver.ts';
+import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type SolveOptions } from './solver.ts';
 
 describe('Ideal Time', () => {
   it('is the moment the Feed crosses the player end of the table, after its bounce', () => {
-    const { velocity } = solveLaunch(FEEDER_MOUTH, { x: -0.3, z: 0.6 }, 1.0);
+    const { velocity } = solveShot(FEEDER_MOUTH, { target: { x: -0.3, z: 0.6 }, flightTime: 1.0, topspin: 0, sidespin: 0 })!;
     const feed = launchBall(FEEDER_MOUTH, velocity);
 
     const ideal = findIdealTime(feed);
@@ -371,5 +386,139 @@ describe('Feeds in play', () => {
     } finally {
       TIME_SCALE.reset();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Solver failure (spec P1-c): failed draws are redrawn, then the centre fallback
+// ---------------------------------------------------------------------------
+
+interface SolveCall {
+  intent: ShotIntent;
+  opts: Partial<SolveOptions> | undefined;
+}
+
+/**
+ * A stand-in solver that records its calls. `fails(call number)` says whether
+ * to fail that call (with `failure`); otherwise, and always for best effort
+ * (the contract), it solves for real.
+ */
+function stubSolver(fails: (call: number) => boolean, failure: (from: Vec3, intent: ShotIntent) => ShotSolution | null = () => null) {
+  const calls: SolveCall[] = [];
+  const solve = ((from: Vec3, intent: ShotIntent, opts?: Partial<SolveOptions>) => {
+    calls.push({ intent, opts });
+    if (!opts?.bestEffort && fails(calls.length)) return failure(from, intent);
+    return solveShot(from, intent, opts);
+  }) as ShotSolver;
+  return { solve, calls };
+}
+
+/** A "solution" that drives the Feed into the net: it never reaches the player, so it has no Ideal Time. */
+const intoTheNet = (): ShotSolution => ({ velocity: { x: 0, y: 0, z: 6 }, spin: { x: 0, y: 0, z: 0 }, flightTime: 1, passes: 1 });
+
+/** Run a Feeder until its first Feed (3.1 s: the pause, then "3, 2, 1"). */
+function firstFeed(feeder: Feeder): Feed {
+  const feeds: Feed[] = [];
+  feeder.onFeed((feed) => feeds.push(feed));
+  driver(feeder).run(3.1);
+  expect(feeds).toHaveLength(1);
+  return feeds[0]!;
+}
+
+const CENTRE = { x: 0, z: (FEED_TARGET_Z_MIN + FEED_TARGET_Z_MAX) / 2 };
+
+describe('Feeder with a failing solver', () => {
+  it(`redraws the target with the same random, and after ${FEED_MAX_DRAWS} failed draws sends a zero-spin Feed to the centre of the target area`, () => {
+    const { solve, calls } = stubSolver(() => true);
+    const feed = firstFeed(createFeeder({ random: makeRng(1), solve }));
+
+    expect(calls).toHaveLength(FEED_MAX_DRAWS + 1);
+    const draws = calls.slice(0, FEED_MAX_DRAWS);
+    for (const { intent, opts } of draws) {
+      expect(opts?.bestEffort).toBeFalsy();
+      expect(Math.abs(intent.target.x)).toBeLessThanOrEqual(FEED_TARGET_HALF_WIDTH);
+      expect(intent.target.z).toBeGreaterThanOrEqual(FEED_TARGET_Z_MIN);
+      expect(intent.target.z).toBeLessThanOrEqual(FEED_TARGET_Z_MAX);
+    }
+    // Every redraw is a new target.
+    expect(new Set(draws.map((c) => `${c.intent.target.x},${c.intent.target.z}`)).size).toBe(FEED_MAX_DRAWS);
+
+    const fallback = calls[FEED_MAX_DRAWS]!;
+    expect(fallback.intent).toEqual({ target: CENTRE, flightTime: FEED_FLIGHT_TIME_S.value, topspin: 0, sidespin: 0 });
+    expect(fallback.opts?.bestEffort).toBe(true);
+
+    expect(feed.target).toEqual(CENTRE);
+    expect(feed.ball.spin).toEqual({ x: 0, y: 0, z: 0 });
+    expect(feed.idealTime).not.toBeNull();
+    expect(feed.idealAtMs).not.toBeNull();
+  });
+
+  it('counts a Feed that would never reach the player (no Ideal Time) as a failed draw, and redraws', () => {
+    const { solve, calls } = stubSolver((call) => call <= 2, intoTheNet);
+    const feed = firstFeed(createFeeder({ random: makeRng(2), solve }));
+
+    expect(calls).toHaveLength(3);
+    expect(feed.target).toEqual(calls[2]!.intent.target);
+    expect(feed.target).not.toEqual(CENTRE);
+    expect(feed.idealAtMs).not.toBeNull();
+  });
+
+  it('sends the centre fallback after draws that all have no Ideal Time', () => {
+    const { solve, calls } = stubSolver(() => true, intoTheNet);
+    const feed = firstFeed(createFeeder({ random: makeRng(3), solve }));
+    expect(calls).toHaveLength(FEED_MAX_DRAWS + 1);
+    expect(feed.target).toEqual(CENTRE);
+    expect(feed.idealAtMs).not.toBeNull();
+  });
+
+  it.each([FEED_FLIGHT_TIME_S.min, FEED_FLIGHT_TIME_S.default, FEED_FLIGHT_TIME_S.max])(
+    'never emits a Feed without an Ideal Time, over 200 Feeds from a solver that often fails (flight time %s s)',
+    (flightTime) => {
+      const failures = makeRng(99);
+      const { solve } = stubSolver(() => failures() < 0.6, () => (failures() < 0.5 ? null : intoTheNet()));
+      FEED_FLIGHT_TIME_S.set(flightTime);
+      try {
+        const feeder = createFeeder({ random: makeRng(4), solve });
+        const feeds: Feed[] = [];
+        feeder.onFeed((feed) => feeds.push(feed));
+        const game = driver(feeder);
+        while (feeds.length < 200) {
+          game.setBall(OUT_BALL); // end any rally in progress (once its Hit Window has closed)
+          game.run(0.05);
+        }
+        expect(feeds.every((feed) => feed.idealAtMs !== null && feed.idealTime !== null)).toBe(true);
+      } finally {
+        FEED_FLIGHT_TIME_S.reset();
+      }
+    },
+  );
+});
+
+describe('Feed launch', () => {
+  it('launches with the solution’s spin and a per-Shot seed drawn from the injected random', () => {
+    // Draws: target x, target z, then the seed.
+    const draws = [0.5, 0.5, 0.25];
+    const random = () => draws.shift() ?? 0;
+    const feed = firstFeed(createFeeder({ random }));
+    expect(feed.target).toEqual(CENTRE);
+    expect(feed.ball.seed).toBe(Math.floor(0.25 * 2 ** 32));
+    expect(feed.ball.spin).toEqual({ x: 0, y: 0, z: 0 });
+  });
+
+  it('gives each Feed its own seed, the same for the same random seed', () => {
+    const seeds = (seed: number) => {
+      const feeder = createFeeder({ random: makeRng(seed) });
+      const feeds: Feed[] = [];
+      feeder.onFeed((feed) => feeds.push(feed));
+      const game = driver(feeder);
+      while (feeds.length < 3) {
+        game.setBall(OUT_BALL);
+        game.run(0.05);
+      }
+      return feeds.map((feed) => feed.ball.seed);
+    };
+    const first = seeds(7);
+    expect(new Set(first).size).toBe(3);
+    expect(seeds(7)).toEqual(first);
   });
 });

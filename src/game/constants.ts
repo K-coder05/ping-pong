@@ -45,6 +45,22 @@ export const BALL_MASS = 0.0027;
 export const NET_CLEARANCE = 0.05;
 /** When a shot won't clear the net, its flight time is lengthened by this factor (a higher arc) and solved again. */
 export const ARC_RAISE_FACTOR = 1.1;
+/** Most refinement passes (simulate, then correct) the solver makes for one flight time. */
+export const SOLVER_MAX_PASSES = 4;
+/** Most times the solver raises the arc to clear the net before it gives up. */
+export const SOLVER_MAX_RAISES = 5;
+/** Refinement stops once the landing is this close to the target, metres ... */
+export const SOLVER_STOP_MISS_M = 0.01;
+/** ... and the flight time this close to the asked one, seconds. */
+export const SOLVER_STOP_TIME_S = 0.01;
+/** A solution landing further than this from its target is a failure, metres. */
+export const SOLVER_MAX_MISS_M = 0.02;
+/**
+ * A Feed whose solve fails, or that would have no Ideal Time, is a failed
+ * draw; after this many failed draws in a row, the Feeder sends a zero-spin
+ * Feed to the centre of its target area instead.
+ */
+export const FEED_MAX_DRAWS = 5;
 
 // ---------------------------------------------------------------------------
 // Feeder (fixed rules; its timing guesses are knobs below)

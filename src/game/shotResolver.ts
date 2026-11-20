@@ -26,7 +26,7 @@ import {
   TIMING_OFFSET_MS,
 } from './constants.ts';
 import { judgeReturnFlight, type ReturnFlightResult } from './score.ts';
-import { solveLaunch, type TablePoint } from './solver.ts';
+import { solveShot, type ShotIntent, type ShotSolution, type ShotSolver, type TablePoint } from './solver.ts';
 
 /** Live tuning values, read on every use (knobs in the game). */
 export interface ResolverParams {
@@ -226,8 +226,10 @@ export interface ShotResolverOptions {
   params: () => ResolverParams;
   /** The player's hitting hand, read at each accepted Swing. */
   hand: () => Hand;
-  /** Uniform random numbers in [0, 1) for scatter; build one with `makeRng(seed)`. */
+  /** Uniform random numbers in [0, 1) for scatter and each Return's seed; build one with `makeRng(seed)`. */
   random: () => number;
+  /** The target solver; `solveShot` unless a test stands one in. */
+  solve?: ShotSolver;
 }
 
 type FeedState =
@@ -240,6 +242,7 @@ type FeedState =
 
 export function createShotResolver(options: ShotResolverOptions): ShotResolver {
   const random = options.random;
+  const solve = options.solve ?? solveShot;
   let state: FeedState = { phase: 'none' };
 
   return {
@@ -278,8 +281,10 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
       if (state.phase === 'accepted' && nowMs >= state.accepted.contactAtMs) {
         const { swing, delta, plan } = state.accepted;
         const position = contactPoint(ball.position);
-        const launch = solveLaunch(position, plan.target, plan.flightTime);
-        events.push({ type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: launchBall(position, launch.velocity) });
+        const solution = solveReturn(solve, position, { target: plan.target, flightTime: plan.flightTime, topspin: 0, sidespin: 0 });
+        const seed = Math.floor(random() * 2 ** 32);
+        const struck = launchBall(position, solution.velocity, solution.spin, seed);
+        events.push({ type: 'contact', atMs: nowMs, position, swing, side: swing.side, delta, plan, ball: struck });
         state = { phase: 'returning' };
       }
       if (state.phase === 'open') {
@@ -295,6 +300,20 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
       return events;
     },
   };
+}
+
+/**
+ * Solve a Return for its planned target, which never moves because the solver
+ * failed (ADR 0001): a planned miss, long or wide, stays a miss. If the
+ * intent can't be solved, it is tried again with no spin (when it had any),
+ * then solved best-effort with no spin, and that launch is used.
+ */
+export function solveReturn(solve: ShotSolver, from: Vec3, intent: ShotIntent): ShotSolution {
+  const solved = solve(from, intent);
+  if (solved) return solved;
+  const flat = { ...intent, topspin: 0, sidespin: 0 };
+  const hasSpin = intent.topspin !== 0 || intent.sidespin !== 0;
+  return (hasSpin ? solve(from, flat) : null) ?? solve(from, flat, { bestEffort: true });
 }
 
 /**
