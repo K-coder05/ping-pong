@@ -244,8 +244,10 @@ core.onShot((event) => {
 core.onBounce(() => sounds.bounce());
 
 /** The play log: one entry per Shot coming to the player (fit with `npm run fit-player`). */
-const playLog = createPlayLogRecorder({ mode: 'drill' });
-core.feeder.onFeed((feed) => playLog.startFeed(feed.idealAtMs));
+const playLog = createPlayLogRecorder({ mode: core.mode });
+core.onIncoming((incoming) => {
+  if (incoming.receiver === 'player') playLog.startFeed(incoming.idealAtMs);
+});
 core.onShot((event) => playLog.shot(event));
 knobs.button({
   name: 'Download play log',
