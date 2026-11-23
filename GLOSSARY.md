@@ -1,6 +1,6 @@
 # Ping Pong
 
-A webcam table-tennis game where the player swings at the laptop camera to hit the ball. It has two modes: Return Drill, where a machine feeds balls, and Match, against a computer Opponent.
+A table-tennis game where the player hits the ball by swinging at the laptop camera, or with their phone in hand. It has two modes: Return Drill, where a machine feeds balls, and Match, against a computer Opponent.
 
 ## Play
 
@@ -80,6 +80,18 @@ An Opponent mistake: it swings and doesn't touch the ball. The player's equivale
 
 ## Swinging
 
+**Input**:
+How the player's Swings reach the game: **Camera** (the laptop webcam watching the hitting wrist) or **Phone** (held in the hitting hand).
+_Avoid_: input mode, webcam mode, phone mode
+
+**Phone**:
+The player's own phone, held like the handle of a bat, whose motion gives the game Swings and the Face Angle.
+_Avoid_: paddle, controller, remote
+
+**Zeroing**:
+Telling the game how the player holds the Phone with its face upright and pointing at the screen; the Face Angle is measured from there.
+_Avoid_: calibration (that is Timing calibration)
+
 **Swing**:
 A deliberate stroke by the player's hitting arm toward the ball, as recognised by the game.
 _Avoid_: Hit, gesture
@@ -91,17 +103,21 @@ The moment a Swing is recognised: the wrist moving fast in the Stroke Direction.
 The way the wrist must travel for movement to count as a Swing: toward the non-hitting side for a Forehand, toward the hitting side for a Backhand.
 
 **Lift**:
-How steeply a Swing rises at Onset. It sets a Return's Topspin and is how the player answers an incoming Shot's Spin: Backspin needs more Lift, Topspin less.
+How steeply a Swing rises at Onset, with the Camera. It sets a Return's Topspin and is how the player answers an incoming Shot's Spin: Backspin needs more Lift, Topspin less.
+
+**Face Angle**:
+With the Phone, how far the bat's face is tipped from upright at Swing Onset: **closed** (toward the floor) or **open** (toward the ceiling). It takes Lift's place: a closed face sets Topspin, an open face Backspin, and the player answers an incoming Shot's Spin by closing against Topspin and opening against Backspin.
+_Avoid_: tilt (in prose)
 
 **Backswing**:
 The wind-up movement against the Stroke Direction before a Swing; it is never a Swing.
 
 **Forehand** / **Backhand**:
-The side of a Swing, decided by which side of the body's midline the wrist was on when the stroke started (its last stop or change of direction), so a fast stroke that has already crossed the midline at Onset keeps its side. Side never decides whether a Return succeeds.
+The side of a Swing, from its Stroke Direction. The Camera judges it by which side of the body's midline the wrist was on when the stroke started (its last stop or change of direction), so a fast stroke that has already crossed the midline at Onset keeps its side; the Phone judges it by which way it rotates. Side never decides whether a Return succeeds.
 
 **Paddle**:
-The on-screen bat that follows the player's hitting wrist.
-_Avoid_: Racket, bat, paddle marker
+The on-screen bat that follows the player's hitting hand, whether the Camera or the Phone is the Input.
+_Avoid_: Racket, bat, paddle marker, paddle (for the Phone)
 
 ## Timing
 
@@ -116,7 +132,7 @@ The span around the Ideal Time in which a Swing counts.
 The ways the player fails to return a Shot: a Swing before the Hit Window, a Swing after it, or no Swing at all.
 
 **Timing Offset**:
-A per-player correction, measured during calibration, between when the player means to hit and when the game sees their Swing Onset.
+A per-player, per-Input correction, measured during Timing calibration, between when the player means to hit and when the game sees their Swing Onset.
 _Avoid_: Lag, delay
 
 ## Spin
