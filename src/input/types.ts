@@ -13,6 +13,8 @@ export interface SwingEvent {
   side: 'forehand' | 'backhand';
   /** Vertical wrist speed at Onset, shoulder widths/s; + = moving upward. Unused until spin is added. */
   vertPath: number;
+  /** Face Angle at Swing Onset, radians from Zero; + = closed (toward the floor), − = open. Only the Phone sets it. */
+  faceAngle?: number;
 }
 
 /** Anything that produces Swings: pose input or mouse input. */

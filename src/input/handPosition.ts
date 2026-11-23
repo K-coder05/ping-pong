@@ -15,6 +15,8 @@ export interface HandPosition {
   u: number;
   /** Vertical position `p.y`, shoulder widths below the shoulder midpoint (image y grows downward). */
   py: number;
+  /** Face Angle now, radians, for drawing the Paddle tipped. Only the Phone sets it. */
+  faceAngle?: number;
 }
 
 /** Anything that knows where the hitting wrist is. */
