@@ -1,8 +1,12 @@
 /**
  * Signaling server (docs/specs/p3.md, P3-a; ADR 0004): pairs the laptop and
  * the Phone by room code and forwards their WebRTC offer, answer and ICE
- * candidates. Once paired, motion goes peer to peer and never passes here.
- * The protocol is in `src/phone/signalProtocol.ts`.
+ * candidates. Once paired, motion goes peer to peer and never passes here,
+ * except in relay (P3-e §1): when peer to peer is blocked, the pages send
+ * motion packets (binary frames) and control messages (`relay`) through
+ * their sockets, and the server forwards them to the other peer, capped per
+ * room and second; the excess is dropped, never queued. The protocol is in
+ * `src/phone/signalProtocol.ts`.
  *
  *   npm run signal                 # PORT (default 8787)
  *
@@ -17,8 +21,11 @@ import { randomInt } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { pathToFileURL } from 'node:url';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { WebSocketServer, type RawData, type WebSocket } from 'ws';
+import { PACKET_BYTES } from '../src/phone/packet.ts';
 import {
+  RELAY_MAX_PER_S,
+  RELAY_MOTION_MAX_PER_S,
   isRoomCode,
   makeRoomCode,
   parseClientMessage,
@@ -34,9 +41,11 @@ const SWEEP_MS = 30 * 1000;
 const MAX_PAYLOAD_BYTES = 64 * 1024;
 /** WebSocket close code sent to peers of an expired room. */
 export const CLOSE_ROOM_EXPIRED = 4000;
+/** A peer this far behind on reading gets no more relayed motion until it catches up: a late packet is useless. */
+const RELAY_MAX_BUFFERED_BYTES = 16 * 1024;
 
 export interface SignalServerOptions {
-  /** ms; injectable so expiry is testable. */
+  /** ms; injectable so expiry and the relay cap are testable. */
   now?: () => number;
   idleMs?: number;
   /** Integer in [0, n); crypto by default, so room codes can't be guessed. */
@@ -58,6 +67,40 @@ interface Room {
   code: string;
   peers: Set<WebSocket>;
   lastActive: number;
+  relayed: RelayWindow;
+}
+
+/** When the room's relayed messages in the last second were forwarded, oldest first. */
+export interface RelayWindow {
+  all: number[];
+  motion: number[];
+}
+
+export function newRelayWindow(): RelayWindow {
+  return { all: [], motion: [] };
+}
+
+/**
+ * Whether one more relayed message at `t` (ms) fits the room's cap: at most
+ * `RELAY_MAX_PER_S` in any second, of which at most `RELAY_MOTION_MAX_PER_S`
+ * motion packets, so a full motion stream never crowds out control messages.
+ * Records it when it fits. A message that doesn't fit is dropped by the
+ * caller, so nothing ever waits.
+ */
+export function admitRelay(w: RelayWindow, motion: boolean, t: number): boolean {
+  const cutoff = t - 1000;
+  while (w.all.length > 0 && w.all[0]! <= cutoff) w.all.shift();
+  while (w.motion.length > 0 && w.motion[0]! <= cutoff) w.motion.shift();
+  if (w.all.length >= RELAY_MAX_PER_S) return false;
+  if (motion && w.motion.length >= RELAY_MOTION_MAX_PER_S) return false;
+  w.all.push(t);
+  if (motion) w.motion.push(t);
+  return true;
+}
+
+function toBuffer(raw: RawData): Buffer {
+  if (Buffer.isBuffer(raw)) return raw;
+  return Array.isArray(raw) ? Buffer.concat(raw) : Buffer.from(raw);
 }
 
 export function createSignalServer(opts: SignalServerOptions = {}): SignalServer {
@@ -101,15 +144,33 @@ export function createSignalServer(opts: SignalServerOptions = {}): SignalServer
     else for (const p of room.peers) send(p, { type: 'peer-left' });
   };
 
+  /** The other peer in `ws`'s room, if any, once the relayed message fits the room's cap; otherwise drop it. */
+  const relayTarget = (ws: WebSocket, motion: boolean): WebSocket | null => {
+    const room = roomOf.get(ws);
+    if (!room) return null;
+    const other = [...room.peers].find((p) => p !== ws);
+    if (!other) return null;
+    room.lastActive = now();
+    return admitRelay(room.relayed, motion, room.lastActive) ? other : null;
+  };
+
   wss.on('connection', (ws) => {
     ws.on('message', (raw, isBinary) => {
-      const m = isBinary ? null : parseClientMessage(raw.toString());
+      if (isBinary) {
+        // Relay: one motion packet.
+        const bytes = toBuffer(raw);
+        if (bytes.length !== PACKET_BYTES) return send(ws, { type: 'error', code: 'bad-message' });
+        const to = relayTarget(ws, true);
+        if (to && to.readyState === to.OPEN && to.bufferedAmount <= RELAY_MAX_BUFFERED_BYTES) to.send(bytes, { binary: true });
+        return;
+      }
+      const m = parseClientMessage(raw.toString());
       if (!m) return send(ws, { type: 'error', code: 'bad-message' });
       const current = roomOf.get(ws);
       switch (m.type) {
         case 'create': {
           if (current) return send(ws, { type: 'error', code: 'already-in-room' });
-          const room: Room = { code: newCode(), peers: new Set([ws]), lastActive: now() };
+          const room: Room = { code: newCode(), peers: new Set([ws]), lastActive: now(), relayed: newRelayWindow() };
           rooms.set(room.code, room);
           roomOf.set(ws, room);
           return send(ws, { type: 'created', room: room.code });
@@ -133,6 +194,14 @@ export function createSignalServer(opts: SignalServerOptions = {}): SignalServer
           for (const p of others) send(p, { type: 'signal', data: m.data });
           return;
         }
+        case 'relay': {
+          const to = relayTarget(ws, false);
+          if (to) send(to, { type: 'relay', data: m.data });
+          return;
+        }
+        case 'keepalive':
+          if (current) current.lastActive = now();
+          return;
       }
     });
     ws.on('close', () => leave(ws));

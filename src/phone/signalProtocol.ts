@@ -6,13 +6,31 @@
  *   page → server   { type: 'create' }                 laptop: make a room
  *                   { type: 'join', room }              Phone: enter a room
  *                   { type: 'signal', data }            forwarded to the other peer
+ *                   { type: 'relay', data }             relay: a ControlMessage for the other peer
+ *                   { type: 'keepalive' }               keeps the room from expiring; no answer
+ *                   binary frame, 48 bytes              relay: one motion packet (`encodePacket`)
  *   server → page   { type: 'created', room }           to the laptop
  *                   { type: 'joined', room }            to the Phone
  *                   { type: 'peer-joined' }             to the peer already in the room
  *                   { type: 'peer-left' }               to the peer still in the room
  *                   { type: 'signal', data }            from the other peer
+ *                   { type: 'relay', data }             relay: a ControlMessage from the other peer
+ *                   binary frame, 48 bytes              relay: a motion packet from the other peer
  *                   { type: 'error', code }             the request failed; the socket stays open
+ *
+ * Relay (P3-e §1, ADR 0004): when peer to peer is blocked, both pages switch
+ * to relay (they tell each other with a `signal` whose data is
+ * `{ kind: 'relay' }`) and send through this socket instead: motion packets
+ * as binary frames, control messages wrapped in `relay`. The server forwards
+ * both to the other peer, at most `RELAY_MAX_PER_S` per room per second, and
+ * drops the excess, never queues it. Relay traffic with nobody else in the
+ * room is dropped silently.
  */
+
+/** Relayed messages per room per second, both ways, motion and control together. */
+export const RELAY_MAX_PER_S = 120;
+/** Of those, at most this many motion packets, so control messages always have room. */
+export const RELAY_MOTION_MAX_PER_S = 100;
 
 /** Room code characters: no look-alikes (0/O, 1/I/L). */
 export const ROOM_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
@@ -47,7 +65,9 @@ export type SignalErrorCode =
 export type ClientMessage =
   | { type: 'create' }
   | { type: 'join'; room: string }
-  | { type: 'signal'; data: unknown };
+  | { type: 'signal'; data: unknown }
+  | { type: 'relay'; data: unknown }
+  | { type: 'keepalive' };
 
 export type ServerMessage =
   | { type: 'created'; room: string }
@@ -55,6 +75,7 @@ export type ServerMessage =
   | { type: 'peer-joined' }
   | { type: 'peer-left' }
   | { type: 'signal'; data: unknown }
+  | { type: 'relay'; data: unknown }
   | { type: 'error'; code: SignalErrorCode };
 
 /** Parse a client message, or null when it isn't one. */
@@ -74,6 +95,10 @@ export function parseClientMessage(text: string): ClientMessage | null {
       return { type: 'join', room: typeof o.room === 'string' ? o.room : '' };
     case 'signal':
       return 'data' in o ? { type: 'signal', data: o.data } : null;
+    case 'relay':
+      return 'data' in o ? { type: 'relay', data: o.data } : null;
+    case 'keepalive':
+      return { type: 'keepalive' };
     default:
       return null;
   }

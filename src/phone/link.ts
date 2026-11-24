@@ -9,10 +9,29 @@
  *   channel opens are dropped.
  * - `control`: reliable and ordered, JSON `ControlMessage`s.
  *
+ * Relay (P3-e §1, ADR 0004): if the channels aren't open 5 s after signaling
+ * with the other page starts, or they close and don't reopen within 3 s
+ * (`fallback.ts`), the link gives up on peer to peer for this pairing. It
+ * tells the other page (a `signal` with `{ kind: 'relay' }`), both show
+ * `relay`, and everything goes through the signaling socket instead: motion
+ * packets as binary frames, paced to `RELAY_MOTION_HZ`, and control messages
+ * (clock sync pings and pongs, `zero`, `haptic`) wrapped in `relay`. The
+ * server caps relay traffic per room and drops the excess, so in relay a
+ * control message can be lost: ClockSync pings again after a second, and the
+ * player taps Zero again. When the channels close, the laptop makes one fresh
+ * offer straight away, so a short drop can reopen within the 3 s.
+ *
+ * The signaling socket stays open for the whole pairing, with a keepalive so
+ * the room doesn't expire while the Phone plays peer to peer; that keeps
+ * relay possible later. Only in relay does losing the socket disconnect.
+ *
  * A thin wrapper over `WebSocket` and `RTCPeerConnection`; checked end to end
- * by `e2e/pairing.spec.ts`. ICE servers default to none: on the same network
- * host candidates are enough, and there is no TURN (ADR 0004).
+ * by `e2e/pairing.spec.ts` and `e2e/relay.spec.ts`. ICE servers default to
+ * none: on the same network host candidates are enough, and there is no TURN
+ * (ADR 0004).
  */
+import type { Schedule } from './clock.ts';
+import { RELAY_MOTION_HZ, createFallback, createRelayPacer } from './fallback.ts';
 import { PACKET_BYTES, decodePacket, encodePacket } from './packet.ts';
 import type { SignalErrorCode, ServerMessage } from './signalProtocol.ts';
 import type { ControlMessage, LinkStatus, MotionPacket, PhoneLink } from './types.ts';
@@ -70,7 +89,19 @@ export function openPhoneLink(room: string, opts: LinkOptions): SignalingLink {
 
 type SignalData =
   | { kind: 'description'; description: RTCSessionDescriptionInit }
-  | { kind: 'candidate'; candidate: RTCIceCandidateInit };
+  | { kind: 'candidate'; candidate: RTCIceCandidateInit }
+  /** The sender switched to relay; the receiver follows. */
+  | { kind: 'relay' };
+
+/** ms between keepalives while paired: well inside the server's 10-minute room expiry and common proxy idle timeouts. */
+const KEEPALIVE_MS = 30_000;
+/** In relay, a socket this far behind on sending gets no more motion packets until it catches up: a late packet is useless. */
+const RELAY_MAX_BUFFERED_BYTES = 4 * 1024;
+
+const realSchedule: Schedule = (fn, ms) => {
+  const id = setTimeout(fn, ms);
+  return () => clearTimeout(id);
+};
 
 function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   const isLaptop = joinRoom === null;
@@ -89,6 +120,12 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   let pendingCandidates: RTCIceCandidateInit[] = [];
   /** Signal messages are handled one at a time, in order. */
   let signalChain = Promise.resolve();
+  /** The other page is in the room. */
+  let peerPresent = false;
+  /** Peer to peer gave up for this pairing; everything goes through the socket. */
+  let relaying = false;
+  let keepalive: ReturnType<typeof setInterval> | null = null;
+  const pacer = createRelayPacer(RELAY_MOTION_HZ);
 
   let resolveRoom!: (code: string) => void;
   let rejectRoom!: (e: Error) => void;
@@ -112,8 +149,19 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   };
 
   const ws = new WebSocket(opts.signalUrl);
+  ws.binaryType = 'arraybuffer';
   const sendSignal = (data: SignalData) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'signal', data }));
+  };
+
+  const startKeepalive = () => {
+    keepalive ??= setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' }));
+    }, KEEPALIVE_MS);
+  };
+  const stopKeepalive = () => {
+    if (keepalive !== null) clearInterval(keepalive);
+    keepalive = null;
   };
 
   const teardownPeer = () => {
@@ -125,14 +173,39 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     old?.close();
   };
 
+  /** Give up on peer to peer for this pairing. `tell`: this page decided, so the other page must follow. */
+  const startRelay = (tell: boolean) => {
+    if (relaying || closed || !peerPresent) return;
+    relaying = true;
+    fallback.cancel();
+    teardownPeer();
+    if (tell) sendSignal({ kind: 'relay' });
+    setStatus('relay');
+  };
+
+  const fallback = createFallback({ now, schedule: realSchedule }, () => startRelay(true));
+
+  /** The peer connection or one of its channels went away. */
   const lost = (from: RTCPeerConnection) => {
     if (from !== pc || closed) return;
+    const wasOpen = fallback.state() === 'open';
     teardownPeer();
-    setStatus('disconnected');
+    if (!peerPresent || ws.readyState !== WebSocket.OPEN) {
+      fallback.cancel();
+      setStatus('disconnected');
+      return;
+    }
+    // The other page is still there: the fallback's clock runs, and the laptop tries once more straight away.
+    fallback.closed();
+    setStatus('connecting');
+    if (isLaptop && wasOpen) signalChain = signalChain.then(offer).catch(warn);
   };
 
   const checkOpen = (from: RTCPeerConnection) => {
-    if (from === pc && control?.readyState === 'open' && motion?.readyState === 'open') setStatus('connected');
+    if (from === pc && control?.readyState === 'open' && motion?.readyState === 'open') {
+      fallback.opened();
+      setStatus('connected');
+    }
   };
 
   const attach = (from: RTCPeerConnection, ch: RTCDataChannel) => {
@@ -172,8 +245,9 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     return p;
   };
 
-  /** Laptop: the Phone joined; make the channels and the offer. */
+  /** Laptop: the Phone joined (or the channels closed); make the channels and the offer. */
   const offer = async () => {
+    if (!peerPresent || relaying || closed) return;
     const p = newPeer();
     attach(p, p.createDataChannel('control'));
     attach(p, p.createDataChannel('motion', { ordered: false, maxRetransmits: 0 }));
@@ -183,6 +257,8 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   };
 
   const onSignal = async (data: SignalData) => {
+    if (data.kind === 'relay') return startRelay(false);
+    if (relaying) return; // late offers, answers and candidates for a connection given up on
     if (data.kind === 'description') {
       // The Phone answers each offer with a fresh connection; the laptop takes the answer.
       const p = !isLaptop && data.description.type === 'offer' ? newPeer() : pc;
@@ -199,30 +275,66 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     }
   };
 
+  /** The other page is in the room: signaling starts, and with it the 5 s rule. */
+  const peerArrived = () => {
+    peerPresent = true;
+    relaying = false;
+    fallback.started();
+    startKeepalive();
+  };
+
   ws.onopen = () => {
     ws.send(JSON.stringify(isLaptop ? { type: 'create' } : { type: 'join', room: joinRoom }));
   };
   ws.onmessage = (e) => {
-    if (closed || typeof e.data !== 'string') return;
+    if (closed) return;
+    if (e.data instanceof ArrayBuffer) {
+      // Relay: a motion packet through the server.
+      const tRecv = now();
+      if (e.data.byteLength !== PACKET_BYTES) return;
+      const p = decodePacket(e.data);
+      for (const cb of packetCbs) cb(p, tRecv);
+      return;
+    }
+    if (typeof e.data !== 'string') return;
     const m = JSON.parse(e.data) as ServerMessage;
     switch (m.type) {
       case 'created':
+        roomKnown = true;
+        resolveRoom(m.room);
+        setStatus('waiting');
+        return;
       case 'joined':
         roomKnown = true;
         resolveRoom(m.room);
-        setStatus(m.type === 'created' ? 'waiting' : 'connecting');
+        peerArrived();
+        setStatus('connecting');
         return;
       case 'peer-joined':
+        peerArrived();
         if (isLaptop) signalChain = signalChain.then(offer).catch(warn);
         return;
       case 'peer-left':
-        if (pc) lost(pc);
-        else setStatus('disconnected');
+        peerPresent = false;
+        relaying = false;
+        fallback.cancel();
+        stopKeepalive();
+        teardownPeer();
+        setStatus('disconnected');
         return;
       case 'signal':
         signalChain = signalChain.then(() => onSignal(m.data as SignalData)).catch(warn);
         return;
+      case 'relay': {
+        // Relay: a control message through the server.
+        const tRecv = now();
+        const c = asControl(m.data);
+        if (c) for (const cb of controlCbs) cb(c, tRecv);
+        return;
+      }
       case 'error':
+        // A message that raced the other page leaving; `peer-left` follows.
+        if (roomKnown && m.code === 'no-peer') return;
         if (!roomKnown) {
           ws.close();
           setStatus('disconnected');
@@ -233,8 +345,11 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   };
   ws.onclose = () => {
     if (closed) return;
-    // Once connected, the peers no longer need the server.
+    stopKeepalive();
+    fallback.cancel();
+    // Once connected peer to peer, the pages no longer need the server (but can't fall back to relay now).
     if (status !== 'connected') {
+      relaying = false;
       teardownPeer();
       setStatus('disconnected');
     }
@@ -249,15 +364,23 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     onControl: (cb) => subscribe(controlCbs, cb),
     onError: (cb) => subscribe(errorCbs, cb),
     sendPacket: (p) => {
-      // Not open yet (or gone): drop it. A late packet is useless.
-      if (motion?.readyState === 'open') motion.send(encodePacket(p));
+      // Not open yet (or gone, or behind): drop it. A late packet is useless.
+      if (relaying) {
+        if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= RELAY_MAX_BUFFERED_BYTES && pacer.allow(now())) {
+          ws.send(encodePacket(p));
+        }
+      } else if (motion?.readyState === 'open') motion.send(encodePacket(p));
     },
     sendControl: (m) => {
-      if (control?.readyState === 'open') control.send(JSON.stringify(m));
+      if (relaying) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'relay', data: m }));
+      } else if (control?.readyState === 'open') control.send(JSON.stringify(m));
     },
     close: () => {
       if (closed) return;
       closed = true;
+      fallback.cancel();
+      stopKeepalive();
       teardownPeer();
       ws.close();
       setStatus('disconnected');
@@ -279,9 +402,14 @@ const CONTROL_TYPES = new Set(['ping', 'pong', 'zero', 'haptic']);
 function parseControl(data: unknown): ControlMessage | null {
   if (typeof data !== 'string') return null;
   try {
-    const m = JSON.parse(data) as { type?: unknown };
-    return typeof m === 'object' && m !== null && CONTROL_TYPES.has(m.type as string) ? (m as ControlMessage) : null;
+    return asControl(JSON.parse(data));
   } catch {
     return null;
   }
+}
+
+function asControl(m: unknown): ControlMessage | null {
+  return typeof m === 'object' && m !== null && CONTROL_TYPES.has((m as { type?: unknown }).type as string)
+    ? (m as ControlMessage)
+    : null;
 }

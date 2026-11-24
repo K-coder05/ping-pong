@@ -90,8 +90,8 @@ function join(code: string) {
   const show = () => {
     statusEl.textContent = statusLabel(l.status());
     statusEl.dataset.state = l.status();
-    // Zeroing stays available whenever connected; the laptop decides when to apply it.
-    zeroBtn.hidden = zeroHowEl.hidden = l.status() !== 'connected';
+    // Zeroing stays available whenever connected, peer to peer or by relay; the laptop decides when to apply it.
+    zeroBtn.hidden = zeroHowEl.hidden = l.status() !== 'connected' && l.status() !== 'relay';
   };
   show();
   l.onStatus(show);

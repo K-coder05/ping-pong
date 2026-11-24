@@ -146,6 +146,7 @@ test('1,000 motion packets stream from the Phone page to the laptop with fewer t
 
   // Chrome has `requestPermission` too; headless answers 'prompt' unless the sensors are granted.
   await context.grantPermissions(['accelerometer', 'gyroscope']);
+  await phone.bringToFront(); // a background tab's timers are throttled, which would slow the synthetic stream
   await phone.getByRole('button', { name: 'Tap to start' }).click();
   await expect(phone.getByTestId('rate')).toBeVisible();
 

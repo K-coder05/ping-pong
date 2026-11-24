@@ -36,10 +36,12 @@ describe('room codes', () => {
 });
 
 describe('parseClientMessage', () => {
-  it('parses the three messages', () => {
+  it('parses each message', () => {
     expect(parseClientMessage('{"type":"create"}')).toEqual({ type: 'create' });
     expect(parseClientMessage('{"type":"join","room":"ABCDE"}')).toEqual({ type: 'join', room: 'ABCDE' });
     expect(parseClientMessage('{"type":"signal","data":{"x":1}}')).toEqual({ type: 'signal', data: { x: 1 } });
+    expect(parseClientMessage('{"type":"relay","data":{"type":"zero"}}')).toEqual({ type: 'relay', data: { type: 'zero' } });
+    expect(parseClientMessage('{"type":"keepalive"}')).toEqual({ type: 'keepalive' });
   });
 
   it('returns null for garbage', () => {
@@ -47,5 +49,6 @@ describe('parseClientMessage', () => {
     expect(parseClientMessage('null')).toBeNull();
     expect(parseClientMessage('{"type":"nope"}')).toBeNull();
     expect(parseClientMessage('{"type":"signal"}')).toBeNull();
+    expect(parseClientMessage('{"type":"relay"}')).toBeNull();
   });
 });

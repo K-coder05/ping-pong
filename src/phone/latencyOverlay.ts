@@ -2,12 +2,14 @@
  * Link overlay (docs/specs/p3.md, P3-d), toggled with `L`: how the Phone's
  * motion stream is arriving on the laptop. One-way delay p50 and p95, packet
  * loss from `seq` gaps and the Phone's sample rate over the last few seconds,
- * plus the clock sync's current offset and round trip.
+ * plus the clock sync's current offset and round trip, and whether packets
+ * come peer to peer or by relay through the signaling server (P3-e §1).
  *
  * A thin DOM wrapper: the numbers come from `linkStats` (pure, tested in
  * `clock.test.ts`) and the wording from `overlayLines`.
  */
 import { linkStats, type ClockSync, type LinkStats } from './clock.ts';
+import { RELAY_MOTION_HZ } from './fallback.ts';
 import { statusLabel } from './link.ts';
 import type { LinkStatus, PhoneLink } from './types.ts';
 
@@ -27,12 +29,20 @@ type SyncReadout = Pick<ClockSync, 'offsetMs' | 'rttMs' | 'toLocal'>;
 export function overlayLines(status: LinkStatus, stats: LinkStats, offsetMs: number, rttMs: number): string[] {
   return [
     `Phone      ${statusLabel(status)}`,
-    `Delay      p50 ${ms(stats.oneWayP50)} · p95 ${ms(stats.oneWayP95)}`,
+    `Path       ${pathLabel(status)}`,
+    `Delay     p50 ${ms(stats.oneWayP50)} · p95 ${ms(stats.oneWayP95)}`,
     `Loss       ${stats.lossPct.toFixed(1)} %`,
     `Rate       ${Math.round(stats.rateHz)} Hz`,
     `Offset     ${ms(offsetMs)}`,
     `Round trip ${ms(rttMs)}`,
   ];
+}
+
+/** Which way packets travel: in relay they go through the signaling server, paced to `RELAY_MOTION_HZ` (P3-e §1). */
+export function pathLabel(status: LinkStatus): string {
+  if (status === 'connected') return 'peer to peer';
+  if (status === 'relay') return `relay through the server (max ${RELAY_MOTION_HZ} Hz)`;
+  return '–';
 }
 
 function ms(v: number): string {
