@@ -8,6 +8,7 @@
  * `sensors.ts` and `link.ts`.
  */
 import './phonePage.css';
+import { answerPings } from './clock.ts';
 import { signalUrl } from './signalUrl.ts';
 import { openPhoneLink, statusLabel, type LinkError, type SignalingLink } from './link.ts';
 import { createSensorSource } from './sensors.ts';
@@ -95,6 +96,8 @@ function join(code: string) {
     form.hidden = false;
     input.value = code;
   });
+  // Clock sync (P3-d): answer the laptop's pings first, so the answer leaves as soon as possible.
+  answerPings(l, now);
   let count = 0;
   l.onControl((m) => {
     count++;

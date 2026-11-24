@@ -3,12 +3,15 @@
  * the LAN dev build and for `e2e/pairing.spec.ts`. The game's own wiring
  * comes later (#39). Shows the QR code, room code and status, control
  * messages both ways, and the motion packets received with their live rate.
+ * Runs ClockSync while connected and shows the link overlay (#40).
  */
+import { ClockSync } from './clock.ts';
+import { mountLatencyOverlay } from './latencyOverlay.ts';
 import { openLaptopLink } from './link.ts';
 import { signalUrl } from './signalUrl.ts';
 import { mountPairing } from './pairing.ts';
 import { createRateMeter } from './sensors.ts';
-import type { ControlMessage } from './types.ts';
+import type { ControlMessage, LinkStatus } from './types.ts';
 
 const now = () => performance.now();
 const link = openLaptopLink({ signalUrl: signalUrl(), now });
@@ -41,4 +44,11 @@ link.onControl((m: ControlMessage) => {
 });
 tools.querySelector('button')!.onclick = () => link.sendControl({ type: 'ping', t0: performance.now() });
 
-if (import.meta.env.DEV) Object.assign(window, { __phoneLink: link });
+// Clock sync while the Phone is connected, and the link overlay (`L` hides it), for checking both with a real Phone.
+const sync = new ClockSync(link, now);
+const followLink = (s: LinkStatus) => (s === 'connected' || s === 'relay' ? sync.start() : sync.stop());
+link.onStatus(followLink);
+followLink(link.status());
+mountLatencyOverlay(document.body, link, sync, now, { visible: true });
+
+if (import.meta.env.DEV) Object.assign(window, { __phoneLink: link, __clockSync: sync });

@@ -55,13 +55,46 @@ test('a Phone pairs from the QR link and 10 control messages pass each way, none
 
   const laptopGot = await collectControl(laptop);
   const phoneGot = await collectControl(phone);
-  const pings: ControlMessage[] = Array.from({ length: 10 }, (_, i) => ({ type: 'ping', t0: i }));
-  const pongs: ControlMessage[] = Array.from({ length: 10 }, (_, i) => ({ type: 'pong', t0: i, t1: i + 0.5, t2: i + 0.75 }));
-  await sendControl(laptop, pings);
+  // The laptop's clock sync pings and the Phone's answers share the channel, so each side keeps only these:
+  // haptics to the Phone, and pongs to the laptop marked by a negative t0 (no ping of the clock sync has one).
+  const haptics: ControlMessage[] = Array.from({ length: 10 }, (_, i) => ({ type: 'haptic', ms: i }));
+  const pongs: ControlMessage[] = Array.from({ length: 10 }, (_, i) => ({ type: 'pong', t0: -1 - i, t1: i + 0.5, t2: i + 0.75 }));
+  await sendControl(laptop, haptics);
   await sendControl(phone, pongs);
 
-  await expect.poll(phoneGot).toEqual(pings);
-  await expect.poll(laptopGot).toEqual(pongs);
+  await expect.poll(async () => (await phoneGot()).filter((m) => m.type === 'haptic')).toEqual(haptics);
+  await expect.poll(async () => (await laptopGot()).filter((m) => m.type === 'pong' && m.t0 < 0)).toEqual(pongs);
+});
+
+test("the Phone answers the laptop's clock sync, which finds the offset between the two pages' clocks", async ({ context }) => {
+  const laptop = await context.newPage();
+  const phone = await context.newPage();
+  const room = await openLaptop(laptop);
+  await phone.goto(`/phone.html?room=${room}`);
+  await expect(laptop.getByTestId('status')).toHaveText('Connected');
+
+  // Each page's performance.now() counts from its own time origin, so the Phone's clock minus the laptop's is
+  // the laptop's origin minus the Phone's.
+  const origin = (p: Page) => p.evaluate(() => performance.timeOrigin);
+  const trueOffset = (await origin(laptop)) - (await origin(phone));
+  const sync = () =>
+    laptop.evaluate(() => {
+      const s = (window as unknown as { __clockSync: { isSynced(): boolean; offsetMs(): number; rttMs(): number } }).__clockSync;
+      return { synced: s.isSynced(), offset: s.offsetMs(), rtt: s.rttMs() };
+    });
+  await expect.poll(async () => (await sync()).synced, { timeout: 10_000 }).toBe(true);
+  const { offset, rtt } = await sync();
+  expect(Math.abs(offset - trueOffset)).toBeLessThan(5);
+  expect(rtt).toBeGreaterThanOrEqual(0);
+
+  // The link overlay shows the offset and round trip; L hides and shows it.
+  const overlay = laptop.getByTestId('link-overlay');
+  await expect(overlay).toContainText(/Offset\s+-?\d+\.\d ms/);
+  await expect(overlay).toContainText(/Round trip\s+\d+\.\d ms/);
+  await laptop.keyboard.press('l');
+  await expect(overlay).toBeHidden();
+  await laptop.keyboard.press('l');
+  await expect(overlay).toBeVisible();
 });
 
 test('a Phone pairs by typing the room code', async ({ context }) => {
