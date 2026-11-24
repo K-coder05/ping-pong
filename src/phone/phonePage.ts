@@ -8,7 +8,8 @@
  * `sensors.ts` and `link.ts`.
  */
 import './phonePage.css';
-import { devSignalUrl, openPhoneLink, statusLabel, type LinkError, type SignalingLink } from './link.ts';
+import { signalUrl } from './signalUrl.ts';
+import { openPhoneLink, statusLabel, type LinkError, type SignalingLink } from './link.ts';
 import { createSensorSource } from './sensors.ts';
 import { isRoomCode, normalizeRoomCode } from './signalProtocol.ts';
 
@@ -79,7 +80,7 @@ function join(code: string) {
   errorEl.textContent = '';
   form.hidden = true;
   roomEl.textContent = code;
-  const l = openPhoneLink(code, { signalUrl: devSignalUrl(location), now });
+  const l = openPhoneLink(code, { signalUrl: signalUrl(), now });
   link = l;
   if (import.meta.env.DEV) Object.assign(window, { __phoneLink: l });
   const show = () => {

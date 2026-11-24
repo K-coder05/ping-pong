@@ -4,13 +4,14 @@
  * comes later (#39). Shows the QR code, room code and status, control
  * messages both ways, and the motion packets received with their live rate.
  */
-import { devSignalUrl, openLaptopLink } from './link.ts';
+import { openLaptopLink } from './link.ts';
+import { signalUrl } from './signalUrl.ts';
 import { mountPairing } from './pairing.ts';
 import { createRateMeter } from './sensors.ts';
 import type { ControlMessage } from './types.ts';
 
 const now = () => performance.now();
-const link = openLaptopLink({ signalUrl: devSignalUrl(location), now });
+const link = openLaptopLink({ signalUrl: signalUrl(), now });
 mountPairing(document.body, link);
 
 const tools = document.createElement('div');

@@ -1,0 +1,12 @@
+# Render Blueprint for the Phone signaling server (ADR 0004). Free tier: sleeps after ~15 min idle.
+services:
+  - type: web
+    name: ping-pong-signal
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: node server/signal.ts
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24
