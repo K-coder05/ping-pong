@@ -180,13 +180,15 @@ async function main(): Promise<void> {
   /** The Timing Offset this run is judged with, read at Start. */
   let timingOffsetMs = 0;
 
-  /** The Timing Offset a run is judged with: the Camera's saved one; none yet for the Phone. */
-  const timingOffset = (): number => (phoneMode ? 0 : (timingOffsetStore.offsetMs ?? 0));
+  /** The Input whose saved Timing Offset a run is judged with. */
+  const input = phoneMode ? 'phone' : 'camera';
+
+  /** The Timing Offset a run is judged with: the saved one for this Input, else none. */
+  const timingOffset = (): number => timingOffsetStore.offsetMsFor(input) ?? 0;
 
   /** Which Timing Offset a run will use (or used), for the setup and results screens. */
   const offsetNote = (): string => {
-    if (phoneMode) return 'The Phone has no saved Timing Offset yet: Swings are judged against the raw tick (±300 ms).';
-    const saved = timingOffsetStore.offsetMs;
+    const saved = timingOffsetStore.offsetMsFor(input);
     return saved === null
       ? 'No Timing Offset saved: run Timing calibration in the game first, or Swings are judged against the raw tick.'
       : `Judged with your saved Timing Offset: ${Math.round(saved)} ms (each tick's ±300 ms window starts that much later).`;

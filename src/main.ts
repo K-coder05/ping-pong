@@ -9,11 +9,26 @@
  * to the core; the game never knows whether they come from pose or mouse. The
  * Paddle, sounds and HUD follow the core's Shot and bounce events.
  *
- * Without a URL flag, play is with your hand: onboarding starts the camera
- * (asking first, for a first-time player), then asks for the hitting hand and
- * runs Timing calibration if they aren't saved. Swings come only from pose,
- * the Paddle follows the tracked wrist, and the Feeder pauses (with a "Can't
- * see your hand" banner) while the hitting wrist can't be seen.
+ * The Input (spec P3-e): a `?input=` developer flag, else the player's
+ * remembered choice, else the Input picker (`render/inputPicker.ts`) asks,
+ * Camera or Phone, before anything else. The start screen shows the Input,
+ * and changing it there saves the new choice and reloads the page.
+ *
+ * With the Camera, onboarding starts the camera (asking first, for a
+ * first-time player), then asks for the hitting hand and runs Timing
+ * calibration if they aren't saved. Swings come only from pose, the Paddle
+ * follows the tracked wrist, and the Feeder pauses (with a "Can't see your
+ * hand" banner) while the hitting wrist can't be seen.
+ *
+ * With the Phone, onboarding shows the safety prompt (first time only), the
+ * pairing QR code and room code until the Phone connects, the hand if not
+ * saved, Zeroing, Timing calibration if the Phone has no Timing Offset, and
+ * Continue once it is connected and Zeroed. Swings and the Paddle come from
+ * the Phone Input; play waits while it isn't sending. If it disconnects
+ * after setup, the pairing overlay shows again. In debug mode the Phone log
+ * is recorded for fixtures (debug panel, Phone group).
+ *
+ * Each Input reads and saves its own Timing Offset (`timingOffsetStore`).
  *
  * After onboarding, the start screen (`render/screens.ts`, spec P2-h2)
  * offers Return Drill or a Match (Difficulty, 1 Game or best of 3); a Match
@@ -27,13 +42,8 @@
  * `?input=mouse` swaps in the developer mouse for both and skips onboarding:
  * there is no camera to start and no pose latency to calibrate. The mouse
  * also neither reads nor saves the player's Timing Offset (it would shift the
- * mouse's near-zero-latency Swings); TIMING_OFFSET_MS starts at 0 there.
- *
- * `?input=phone` (a developer flag until P3-e's Input picker) does the same
- * with the Phone: it shows the pairing QR code and room code until a Phone
- * connects, then takes Swings and the Paddle from the Phone Input; play waits
- * until the Phone is Zeroed and sending. In debug mode the Phone log is
- * recorded for fixtures (debug panel, Phone group).
+ * mouse's near-zero-latency Swings); TIMING_OFFSET_MS starts at 0 there. The
+ * mouse is never offered to players.
  */
 import { createSounds, unlockAudioOnGesture } from './audio/sounds.ts';
 import { simulate } from './game/ball.ts';
@@ -58,20 +68,21 @@ import { DEFAULT_DIFFICULTY } from './opponent/difficulty.ts';
 import { BODY_PARAMS, READY_POSE, followOpponentPlan, planBody, type BodyParams, type BodyPlan, type BodyPose } from './opponent/motion.ts';
 import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
-import { matchStartSteps, onboardingSteps, runOnboarding } from './game/onboarding.ts';
+import { matchStartSteps, onboardingSteps, phoneSafetyStore, runOnboarding, type Input, type InputMode } from './game/onboarding.ts';
 import { createPlayLogRecorder, type PlayLogRecorder } from './game/playLog.ts';
 import { contactPoint, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput, startCamera } from './input/installPoseInput.ts';
-import { installMouseInput, swingInputMode, type MouseInput } from './input/mouseInput.ts';
+import { installMouseInput, type MouseInput } from './input/mouseInput.ts';
 import { createPhoneInput, type PhoneInput } from './input/phoneInput.ts';
 import { knobSwingParams } from './input/poseInput.ts';
-import type { SwingSource } from './input/types.ts';
+import type { SwingEvent, SwingSource } from './input/types.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { installCameraOverlay } from './render/cameraOverlay.ts';
 import { createDebugMode, installPhoneLogDownload } from './render/debugMode.ts';
 import { askHandedness } from './render/handednessPrompt.ts';
+import { inputChoice, inputFromSearch, phoneReadiness, pickInput, type PhoneReadiness } from './render/inputPicker.ts';
 import { createHud } from './render/hud.ts';
 import { matchHud, type HudEvent } from './render/hudModel.ts';
 import { createOnboardingScreens } from './render/onboardingScreens.ts';
@@ -90,7 +101,7 @@ import {
 } from './render/screens.ts';
 import { createTableScene } from './render/scene.ts';
 import { sharedSensing } from './sensing/shared.ts';
-import { openLaptopLink } from './phone/link.ts';
+import { openLaptopLink, type SignalingLink } from './phone/link.ts';
 import { mountPairing } from './phone/pairing.ts';
 import { signalUrl } from './phone/signalUrl.ts';
 import { ClockSync } from './phone/clock.ts';
@@ -105,17 +116,24 @@ const debug = createDebugMode({ renderer: tableScene.renderer, playCamera: table
 installCameraOverlay(knobs); // camera + pose debug overlay: D → "Camera overlay", or ?overlay
 const hud = createHud();
 
+/** The developer `?input=` flag (`mouse`, `phone`, `camera`), which overrides the Input picker. */
+const flagInput = inputFromSearch(window.location.search);
 /** Developer mouse mode (`?input=mouse`), never offered to players. */
-const mouseMode = swingInputMode(window.location.search) === 'mouse';
-/** The Phone (`?input=phone`), a developer flag until the Input picker. */
-const phoneMode = swingInputMode(window.location.search) === 'phone';
-/** Whether the Camera's pose drives play (no developer input flag). */
-const poseMode = !mouseMode && !phoneMode;
+const mouseMode = flagInput === 'mouse';
+/** What play swings with: decided by `boot` (the flag, the remembered choice or the Input picker); null until then. */
+let inputMode: InputMode | null = mouseMode ? 'mouse' : null;
+/** Whether the Camera's pose drives play. */
+const poseMode = (): boolean => inputMode === 'camera';
+/** The Input whose Timing Offset play reads and saves: none with the developer mouse. */
+const timingInput = (): Input | null => (inputMode === 'camera' || inputMode === 'phone' ? inputMode : null);
 
 // Pose Swings, wrist and tracking, once the camera is on and the hand is
-// known. In play, the hand comes from onboarding's handedness step (asked
-// after the framing instruction), not from a prompt when the camera starts.
-const pose = installPoseInput(knobs, poseMode ? { hand: () => handedness.chosen() } : {});
+// known. With the Camera, the hand comes from onboarding's handedness step
+// (asked after the framing instruction), not from a prompt when the camera
+// starts; otherwise (the debug overlay) the saved hand, or ask then.
+const pose = installPoseInput(knobs, {
+  hand: async () => (poseMode() ? handedness.chosen() : (handedness.hand ?? (await askHandedness()))),
+});
 
 /** The hitting hand: as saved, or right until the player is asked. */
 const hittingHand = () => handedness.hand ?? 'right';
@@ -133,12 +151,16 @@ const mouse: MouseInput | null =
       })
     : null;
 
-/** The Phone, with `?input=phone` only: paired by QR code, shown until it connects. */
-const phone: PhoneInput | null = phoneMode ? installPhone() : null;
+/** The Phone, once it is the Input: paired by QR code in onboarding. */
+let phone: PhoneInput | null = null;
+/** The Phone's link, for pairing and setup. */
+let phoneLink: SignalingLink | null = null;
 
 function installPhone(): PhoneInput {
   const now = () => performance.now();
   const link = openLaptopLink({ signalUrl: signalUrl(), now });
+  phoneLink = link;
+  // After setup: shown again whenever the Phone disconnects (onboarding pairs it the first time).
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(12,14,20,0.92);color:#e6e9ef;font-family:system-ui,sans-serif';
   document.body.append(overlay);
@@ -148,7 +170,7 @@ function installPhone(): PhoneInput {
   overlay.append(hint);
   const show = () => {
     const connected = link.status() === 'connected' || link.status() === 'relay';
-    overlay.style.display = connected ? 'none' : 'flex';
+    overlay.style.display = connected || !onboarded ? 'none' : 'flex';
   };
   show();
   link.onStatus(show);
@@ -165,10 +187,15 @@ function installPhone(): PhoneInput {
 }
 
 /** The one SwingSource the game listens to: the mouse or Phone if on, otherwise pose. */
-const swings: SwingSource = mouse ?? phone ?? pose;
+const swings = (): SwingSource => mouse ?? phone ?? pose;
 
 /** Where the hitting wrist is, for the Paddle to follow: the mouse or Phone if on, otherwise the tracked wrist. */
-const handPositions: HandPositionSource = mouse ?? phone ?? pose;
+const handPositions = (): HandPositionSource => mouse ?? phone ?? pose;
+
+/** The Phone's setup state: connected (directly or by relay) and Zeroed. */
+function phoneState(): PhoneReadiness {
+  return phoneReadiness({ status: phoneLink?.status() ?? 'idle', zeroed: phone?.zeroed ?? false });
+}
 
 /**
  * The saved Timing Offset becomes the TIMING_OFFSET_MS knob's starting value
@@ -179,9 +206,10 @@ const handPositions: HandPositionSource = mouse ?? phone ?? pose;
  * replace it.
  */
 function applySavedTimingOffset(): void {
-  if (poseMode && timingOffsetStore.offsetMs !== null) TIMING_OFFSET_MS.set(timingOffsetStore.offsetMs);
+  const input = timingInput();
+  const saved = input ? timingOffsetStore.offsetMsFor(input) : null;
+  if (saved !== null) TIMING_OFFSET_MS.set(saved);
 }
-applySavedTimingOffset();
 knobs.button({
   name: 'Reset all knobs',
   group: 'Debug',
@@ -206,11 +234,12 @@ let playing = false;
 async function calibrate(cancellable: boolean): Promise<boolean> {
   calibrating = true;
   try {
-    const video = poseMode ? (await sharedSensing()).video : null;
-    const offsetMs = await onboardingScreens.calibrate({ video, swings, cancellable });
+    const video = poseMode() ? (await sharedSensing()).video : null;
+    const offsetMs = await onboardingScreens.calibrate({ video, swings: swings(), cancellable });
     if (offsetMs === null) return false;
     TIMING_OFFSET_MS.set(offsetMs); // snapped to the knob's 5 ms grid and clamped to its range
-    if (poseMode) timingOffsetStore.save(TIMING_OFFSET_MS.value);
+    const input = timingInput();
+    if (input) timingOffsetStore.save(input, TIMING_OFFSET_MS.value);
     console.info(`Timing Offset: measured ${offsetMs} ms, using ${TIMING_OFFSET_MS.value} ms`);
     return true;
   } finally {
@@ -219,13 +248,13 @@ async function calibrate(cancellable: boolean): Promise<boolean> {
 }
 
 /** Whether the game must wait for the player's hand: never with the mouse; with the Phone, until it is Zeroed and sending. */
-const waitingForHand = (): boolean => (phone ? phone.latest === null : poseMode && pose.tracking !== 'tracked');
+const waitingForHand = (): boolean => (phone ? phone.latest === null : poseMode() && pose.tracking !== 'tracked');
 /**
  * Whether to show "Can't see your hand": once pose is running, until the wrist
  * is first seen and whenever it is lost, during play and calibration (whose
  * Swings also need the wrist tracked).
  */
-const handLost = (): boolean => poseMode && pose.tracking === 'lost';
+const handLost = (): boolean => poseMode() && pose.tracking === 'lost';
 
 /**
  * Whether the core is paused: no new Feed or Serve and no Swings outside play
@@ -407,7 +436,10 @@ function showMatchHud(): void {
  * as the flags ask once onboarding is done; otherwise the start screen
  * shows then (an idle Return Drill core waits behind it, never feeding).
  */
-const screens = createScreens();
+const screens = createScreens({
+  input: () => (flagInput ? null : timingInput()),
+  onChangeInput: () => void changeInput(),
+});
 let screen: ScreenState = skipsStartScreen(window.location.search) ? playingFromSearch(window.location.search) : START_SCREEN;
 startSession(screen.screen === 'playing' ? screen.choice : { mode: 'drill' });
 
@@ -431,8 +463,11 @@ let playRequest = 0;
 async function play(choice: StartChoice): Promise<void> {
   const request = ++playRequest;
   playing = false;
-  // The Phone, like the mouse, has no camera to start and keeps no Timing Offset yet (P3-e adds one per Input).
-  const steps = choice.mode === 'match' ? matchStartSteps({ input: poseMode ? 'pose' : 'mouse', timingOffsetSaved: timingOffsetStore.offsetMs !== null }) : [];
+  const input = timingInput();
+  const steps =
+    choice.mode === 'match'
+      ? matchStartSteps({ input: inputMode ?? 'mouse', timingOffsetSaved: input === null || timingOffsetStore.offsetMsFor(input) !== null })
+      : [];
   if (steps.includes('calibration') && !(await calibrate(true))) {
     if (request === playRequest) dispatch({ type: 'back-to-start' });
     return;
@@ -449,30 +484,62 @@ window.addEventListener('keydown', (event) => {
 });
 
 /**
- * Onboarding: the steps this player still needs (SPEC "Onboarding for the
- * prototype"), then the start screen (or play, with a developer flag).
- * Starting the camera lives here, in its first step; if it can't start, the
- * player is told why and can try again.
+ * The start screen's "Change" next to the Input: pick again; a different
+ * Input is remembered and the page reloads to set it up from scratch (the
+ * camera, or a fresh pairing room).
  */
-const onboardingPlan = onboardingSteps({
-  input: poseMode ? 'pose' : 'mouse',
-  handSaved: handedness.hand !== null,
-  timingOffsetSaved: timingOffsetStore.offsetMs !== null,
-});
-void runOnboarding(onboardingPlan, {
-  'ask-camera': () => onboardingScreens.askCamera(startCamera),
-  'start-camera': () => onboardingScreens.startCamera(startCamera),
-  framing: async () => onboardingScreens.framing((await sharedSensing()).video),
-  handedness: async () => handedness.set(await askHandedness()),
-  calibration: async () => void (await calibrate(false)),
-}).then(
-  () => {
-    onboarded = true;
-    if (screen.screen === 'playing') playing = true; // the developer flags' session, already made
-    else screens.show(screen, dispatch);
-  },
-  (error: unknown) => console.error('Onboarding failed', error),
-);
+async function changeInput(): Promise<void> {
+  const current = timingInput();
+  const next = await pickInput(current);
+  if (next === current) return;
+  inputChoice.save(next);
+  window.location.reload();
+}
+
+/**
+ * Boot: decide the Input (the developer flag, the remembered choice, or ask
+ * with the Input picker), build it, then onboarding: the steps this player
+ * still needs with that Input (SPEC "Onboarding for the prototype"; spec
+ * P3-e), then the start screen (or play, with a developer flag). Starting the
+ * camera lives here, in its first step; if it can't start, the player is told
+ * why and can try again.
+ */
+async function boot(): Promise<void> {
+  if (flagInput) inputMode = flagInput; // a developer flag is never remembered
+  else {
+    const picked = inputChoice.input ?? (await pickInput());
+    inputChoice.save(picked);
+    inputMode = picked;
+  }
+  if (inputMode === 'phone') phone = installPhone();
+  swings().subscribe(onSwing);
+  applySavedTimingOffset();
+
+  const input = timingInput();
+  const onboardingPlan = onboardingSteps({
+    input: inputMode,
+    handSaved: handedness.hand !== null,
+    timingOffsetSaved: input !== null && timingOffsetStore.offsetMsFor(input) !== null,
+    phoneSafetySeen: phoneSafetyStore.seen,
+  });
+  await runOnboarding(onboardingPlan, {
+    'ask-camera': () => onboardingScreens.askCamera(startCamera),
+    'start-camera': () => onboardingScreens.startCamera(startCamera),
+    framing: async () => onboardingScreens.framing((await sharedSensing()).video),
+    handedness: async () => handedness.set(await askHandedness()),
+    calibration: async () => void (await calibrate(false)),
+    'phone-safety': async () => {
+      await onboardingScreens.phoneSafety();
+      phoneSafetyStore.acknowledge();
+    },
+    'phone-pairing': () => onboardingScreens.phonePairing(phoneLink!, phoneState),
+    'phone-zeroing': () => onboardingScreens.phoneZeroing(phoneState),
+    'phone-ready': () => onboardingScreens.phoneReady(phoneState),
+  });
+  onboarded = true;
+  if (screen.screen === 'playing') playing = true; // the developer flags' session, already made
+  else screens.show(screen, dispatch);
+}
 
 knobs.button({
   name: 'Redo calibration',
@@ -495,13 +562,14 @@ knobs.button({
   },
 });
 
-swings.subscribe((swing) => {
+/** Every Swing from the Input in play goes to the core. */
+function onSwing(swing: SwingEvent): void {
   // Pose emits Swings only while the wrist is tracked, which may be newer
   // than the last frame's pause: refresh it first, so the Swing is judged
   // exactly when play is on.
   core.setPaused(corePaused());
   core.swing(swing, performance.now());
-});
+}
 
 knobs.button({ name: 'Drop ball (30 cm)', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.drop()) });
 knobs.button({ name: 'Throw into net', group: 'Ball', onPress: () => core.setBall(DEBUG_THROWS.intoNet()) });
@@ -561,10 +629,12 @@ function frame(now: number): void {
   debug.update(elapsedSeconds);
   ballStatus.update(core.ball, debug.active);
   tableScene.syncBall(core.ball.position, core.ball.spin);
-  tableScene.syncPaddle(paddle.update(now, handPositions.latest));
+  tableScene.syncPaddle(paddle.update(now, handPositions().latest));
   tableScene.syncIdealTimeMarker(idealTimeMarker());
   tableScene.syncOpponent(core.mode === 'match' ? updateOpponentBody(now, elapsedSeconds) : null);
   tableScene.render(debug.camera);
 }
 
 tableScene.renderer.setAnimationLoop(frame);
+
+boot().catch((error: unknown) => console.error('Onboarding failed', error));

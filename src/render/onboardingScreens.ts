@@ -1,7 +1,10 @@
 import { cameraErrorMessage } from '../game/onboarding.ts';
 import { CALIBRATION_TICKS, runTimingCalibration } from '../game/timingCalibration.ts';
 import type { SwingSource } from '../input/types.ts';
+import type { SignalingLink } from '../phone/link.ts';
+import { mountPairing } from '../phone/pairing.ts';
 import { parkVideo } from '../sensing/camera.ts';
+import type { PhoneReadiness } from './inputPicker.ts';
 import { createMetronomePresentation } from '../tools/metronomePresentation.ts';
 
 /**
@@ -9,6 +12,8 @@ import { createMetronomePresentation } from '../tools/metronomePresentation.ts';
  * full-screen panel over the game. Each method shows one step and resolves
  * when the player is through it; the order is decided by `game/onboarding.ts`.
  * "Which hand holds the paddle?" is the existing `askHandedness` prompt.
+ * The Phone's steps (safety, pairing, Zeroing, Continue) read the Phone's
+ * state through `PhoneReadiness` (`render/inputPicker.ts`), polled while shown.
  *
  * The panel sits below the debug panel and camera overlay, so debug mode
  * still works during onboarding.
@@ -26,7 +31,18 @@ export interface OnboardingScreens {
    * Swings were seen. With `cancellable`, a Cancel button resolves null.
    */
   calibrate(options: { video: HTMLVideoElement | null; swings: SwingSource; cancellable: boolean }): Promise<number | null>;
+  /** Phone, first time only: grip firmly, a wrist strap or lanyard case, clear space. Resolves on "Got it". */
+  phoneSafety(): Promise<void>;
+  /** Phone: the QR code, the room code in large text and the connection status. Resolves once the Phone is connected. */
+  phonePairing(link: SignalingLink, readiness: () => PhoneReadiness): Promise<void>;
+  /** Phone: tap Zero on the Phone. Resolves once it is Zeroed. */
+  phoneZeroing(readiness: () => PhoneReadiness): Promise<void>;
+  /** Phone, last: Continue, enabled only while the Phone is connected and Zeroed. Resolves on Continue. */
+  phoneReady(readiness: () => PhoneReadiness): Promise<void>;
 }
+
+/** How often the Phone's steps re-read its state, ms. */
+const PHONE_POLL_MS = 100;
 
 const STYLE = `
 .onboarding {
@@ -58,6 +74,13 @@ const STYLE = `
 .onboarding .stage .banner:empty { display: none; }
 .onboarding .actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 .onboarding button { font: inherit; font-weight: 600; padding: 10px 22px; border-radius: 8px; cursor: pointer; }
+.onboarding button:disabled { cursor: not-allowed; opacity: 0.5; }
+.onboarding .safety { display: inline-block; margin: 0 0 18px; padding: 0 0 0 1.2em; text-align: left; }
+.onboarding .safety li { margin: 0 0 8px; }
+.onboarding .checks { display: grid; grid-template-columns: auto auto; gap: 6px 18px; justify-content: center; margin: 0 0 18px; text-align: left; }
+.onboarding .checks dt { color: #9aa4b5; }
+.onboarding .checks dd { margin: 0; font-weight: 700; }
+.onboarding .checks dd[data-ok="true"] { color: #5fd38d; }
 `;
 
 export function createOnboardingScreens(): OnboardingScreens {
@@ -130,6 +153,45 @@ export function createOnboardingScreens(): OnboardingScreens {
   }
 
   const PRIVACY = 'Your video stays on this device. Nothing is recorded or uploaded.';
+
+  /** The Phone's connection and Zeroing, refreshed by `poll`. */
+  function phoneChecks(readiness: () => PhoneReadiness) {
+    const element = Object.assign(document.createElement('dl'), { className: 'checks' });
+    const connection = document.createElement('dd');
+    const zeroing = document.createElement('dd');
+    element.append(Object.assign(document.createElement('dt'), { textContent: 'Phone' }), connection);
+    element.append(Object.assign(document.createElement('dt'), { textContent: 'Zero' }), zeroing);
+    const update = (): PhoneReadiness => {
+      const r = readiness();
+      connection.textContent = r.connection;
+      connection.dataset.ok = String(r.connected);
+      zeroing.textContent = r.zeroing;
+      zeroing.dataset.ok = String(r.zeroed);
+      return r;
+    };
+    update();
+    return { element, update };
+  }
+
+  /**
+   * Re-read the Phone's state every `PHONE_POLL_MS` until `done` says so,
+   * then hide the panel and resolve.
+   */
+  function poll(tick: () => boolean): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (tick()) {
+        hide();
+        resolve();
+        return;
+      }
+      const timer = setInterval(() => {
+        if (!tick()) return;
+        clearInterval(timer);
+        hide();
+        resolve();
+      }, PHONE_POLL_MS);
+    });
+  }
 
   /** Start the camera, showing progress; resolves true once it is on, false after showing why it failed. */
   async function tryStart(startCamera: () => Promise<void>, retry: () => void): Promise<boolean> {
@@ -256,13 +318,85 @@ export function createOnboardingScreens(): OnboardingScreens {
           const measurement = await run.result;
           presented.dispose();
           if (!measurement) {
-            intro("We didn't see enough swings. Make sure your whole swing is in the picture, then try again.");
+            intro(
+              video
+                ? "We didn't see enough swings. Make sure your whole swing is in the picture, then try again."
+                : "We didn't see enough swings. Swing firmly on each flash, then try again.",
+            );
             return;
           }
           finish(measurement.offsetMs);
         }
 
         intro();
+      });
+    },
+
+    phoneSafety() {
+      return new Promise<void>((resolve) => {
+        const list = Object.assign(document.createElement('ul'), { className: 'safety' });
+        for (const line of [
+          'Grip your Phone firmly.',
+          'Use a wrist strap or a lanyard case if you have one.',
+          'Clear space around you: nothing and nobody within swinging reach.',
+        ]) {
+          list.append(Object.assign(document.createElement('li'), { textContent: line }));
+        }
+        show(
+          heading('Before you swing your Phone'),
+          list,
+          actions(
+            button('Got it', () => {
+              hide();
+              resolve();
+            }),
+          ),
+        );
+      });
+    },
+
+    phonePairing(link, readiness) {
+      const pairing = document.createElement('div');
+      show(
+        heading('Pair your Phone'),
+        paragraph('Scan the code with your Phone’s camera, or open the address below and type the room code. Then tap “Tap to start” on the Phone.'),
+        pairing,
+      );
+      const unmount = mountPairing(pairing, link);
+      return poll(() => readiness().connected).finally(unmount);
+    },
+
+    phoneZeroing(readiness) {
+      const checks = phoneChecks(readiness);
+      show(
+        heading('Zero your Phone'),
+        paragraph('Hold the Phone like the handle of a bat, screen facing your palm side, and point it at this screen.'),
+        paragraph('Then tap Zero on the Phone. You can Zero again at any time.'),
+        checks.element,
+      );
+      return poll(() => checks.update().zeroed);
+    },
+
+    phoneReady(readiness) {
+      return new Promise<void>((resolve) => {
+        const checks = phoneChecks(readiness);
+        let done = false;
+        const go = Object.assign(document.createElement('button'), { type: 'button', textContent: 'Continue' });
+        show(heading('Ready to play'), paragraph('Your Phone is set up. Continue when you are in position.'), checks.element, actions(go));
+        const refresh = () => {
+          go.disabled = !checks.update().canContinue;
+        };
+        refresh();
+        const timer = setInterval(refresh, PHONE_POLL_MS);
+        go.addEventListener('click', () => {
+          refresh();
+          if (done || go.disabled) return;
+          done = true;
+          clearInterval(timer);
+          hide();
+          resolve();
+        });
+        go.focus();
       });
     },
   };

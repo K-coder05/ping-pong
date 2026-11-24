@@ -140,9 +140,12 @@ describe('createPhoneInput', () => {
     phone.packet(fast(0, 0), 5000);
     phone.packet(fast(1, 10), 5010);
     expect(swings).toEqual([]); // not Zeroed yet
+    expect(input.zeroed).toBe(false);
     phone.control({ type: 'ping', t0: 1 }, 5015);
     phone.control({ type: 'zero' }, 5020);
+    expect(input.zeroed).toBe(false); // applied to the next packet
     phone.packet(still(2, 20), 5020);
+    expect(input.zeroed).toBe(true);
     now = 5020;
     expect(input.latest).toMatchObject({ u: 1, py: 0 });
     phone.packet(fast(3, 30, 25), 5030);

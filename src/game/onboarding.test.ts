@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { cameraErrorMessage, matchStartSteps, onboardingSteps, runOnboarding, type OnboardingStep } from './onboarding.ts';
+import type { KeyValueStorage } from './handedness.ts';
+import {
+  cameraErrorMessage,
+  createPhoneSafetyStore,
+  matchStartSteps,
+  onboardingSteps,
+  runOnboarding,
+  type OnboardingStep,
+} from './onboarding.ts';
 
 describe('onboardingSteps', () => {
   it('takes a first-time player through camera, framing, handedness and Timing calibration, in order', () => {
-    expect(onboardingSteps({ input: 'pose', handSaved: false, timingOffsetSaved: false })).toEqual([
+    expect(onboardingSteps({ input: 'camera', handSaved: false, timingOffsetSaved: false })).toEqual([
       'ask-camera',
       'framing',
       'handedness',
@@ -12,16 +20,16 @@ describe('onboardingSteps', () => {
   });
 
   it('sends a returning player straight to the drill once the camera starts', () => {
-    expect(onboardingSteps({ input: 'pose', handSaved: true, timingOffsetSaved: true })).toEqual(['start-camera']);
+    expect(onboardingSteps({ input: 'camera', handSaved: true, timingOffsetSaved: true })).toEqual(['start-camera']);
   });
 
   it('only asks for what is missing, with the framing instruction before it', () => {
-    expect(onboardingSteps({ input: 'pose', handSaved: true, timingOffsetSaved: false })).toEqual([
+    expect(onboardingSteps({ input: 'camera', handSaved: true, timingOffsetSaved: false })).toEqual([
       'ask-camera',
       'framing',
       'calibration',
     ]);
-    expect(onboardingSteps({ input: 'pose', handSaved: false, timingOffsetSaved: true })).toEqual([
+    expect(onboardingSteps({ input: 'camera', handSaved: false, timingOffsetSaved: true })).toEqual([
       'ask-camera',
       'framing',
       'handedness',
@@ -33,14 +41,119 @@ describe('onboardingSteps', () => {
   });
 });
 
+describe('onboardingSteps with the Phone', () => {
+  const CAMERA_ONLY: OnboardingStep[] = ['ask-camera', 'start-camera', 'framing'];
+
+  it('takes a first-time player through safety, pairing, handedness, Zeroing, Timing calibration and Continue, in order', () => {
+    expect(onboardingSteps({ input: 'phone', handSaved: false, timingOffsetSaved: false, phoneSafetySeen: false })).toEqual([
+      'phone-safety',
+      'phone-pairing',
+      'handedness',
+      'phone-zeroing',
+      'calibration',
+      'phone-ready',
+    ]);
+  });
+
+  it('asks for the hand only if it is not saved, and calibrates only without a Phone Timing Offset', () => {
+    expect(onboardingSteps({ input: 'phone', handSaved: true, timingOffsetSaved: false, phoneSafetySeen: true })).toEqual([
+      'phone-pairing',
+      'phone-zeroing',
+      'calibration',
+      'phone-ready',
+    ]);
+    expect(onboardingSteps({ input: 'phone', handSaved: false, timingOffsetSaved: true, phoneSafetySeen: true })).toEqual([
+      'phone-pairing',
+      'handedness',
+      'phone-zeroing',
+      'phone-ready',
+    ]);
+  });
+
+  it('still pairs, Zeroes and waits for Continue for a returning player', () => {
+    expect(onboardingSteps({ input: 'phone', handSaved: true, timingOffsetSaved: true, phoneSafetySeen: true })).toEqual([
+      'phone-pairing',
+      'phone-zeroing',
+      'phone-ready',
+    ]);
+  });
+
+  it('shows the safety prompt only until the player has seen it', () => {
+    expect(onboardingSteps({ input: 'phone', handSaved: true, timingOffsetSaved: true })[0]).toBe('phone-safety');
+    expect(onboardingSteps({ input: 'phone', handSaved: true, timingOffsetSaved: true, phoneSafetySeen: true })).not.toContain('phone-safety');
+  });
+
+  it('never has a camera or framing step', () => {
+    for (const handSaved of [false, true]) {
+      for (const timingOffsetSaved of [false, true]) {
+        for (const phoneSafetySeen of [false, true]) {
+          const steps = onboardingSteps({ input: 'phone', handSaved, timingOffsetSaved, phoneSafetySeen });
+          expect(steps.filter((s) => CAMERA_ONLY.includes(s))).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it('leaves the Camera without any Phone step', () => {
+    for (const handSaved of [false, true]) {
+      for (const timingOffsetSaved of [false, true]) {
+        expect(onboardingSteps({ input: 'camera', handSaved, timingOffsetSaved, phoneSafetySeen: false }).some((s) => s.startsWith('phone-'))).toBe(false);
+      }
+    }
+  });
+});
+
+describe('the Phone safety prompt store', () => {
+  function memoryStorage(): KeyValueStorage {
+    const data: Record<string, string> = {};
+    return { getItem: (key) => data[key] ?? null, setItem: (key, value) => void (data[key] = value) };
+  }
+
+  it('shows the first time only: "Got it" is remembered across page loads', () => {
+    const storage = memoryStorage();
+    const first = createPhoneSafetyStore(() => storage);
+    expect(first.seen).toBe(false);
+    first.acknowledge();
+    expect(first.seen).toBe(true);
+    expect(createPhoneSafetyStore(() => storage).seen).toBe(true);
+  });
+
+  it('survives localStorage throwing: the prompt shows, and "Got it" holds for this page', () => {
+    const throwing: KeyValueStorage = {
+      getItem: () => {
+        throw new Error('SecurityError');
+      },
+      setItem: () => {
+        throw new Error('QuotaExceededError');
+      },
+    };
+    const store = createPhoneSafetyStore(() => throwing);
+    expect(store.seen).toBe(false);
+    expect(() => store.acknowledge()).not.toThrow();
+    expect(store.seen).toBe(true);
+
+    const unavailable = createPhoneSafetyStore(() => {
+      throw new Error('localStorage is not available');
+    });
+    expect(unavailable.seen).toBe(false);
+    expect(() => unavailable.acknowledge()).not.toThrow();
+    expect(unavailable.seen).toBe(true);
+  });
+});
+
 describe('matchStartSteps', () => {
   it('runs Timing calibration first when a Match starts with no Timing Offset saved', () => {
-    expect(matchStartSteps({ input: 'pose', timingOffsetSaved: false })).toEqual(['calibration']);
+    expect(matchStartSteps({ input: 'camera', timingOffsetSaved: false })).toEqual(['calibration']);
   });
 
   it('starts the Match straight away once a Timing Offset is saved, or with the developer mouse', () => {
-    expect(matchStartSteps({ input: 'pose', timingOffsetSaved: true })).toEqual([]);
+    expect(matchStartSteps({ input: 'camera', timingOffsetSaved: true })).toEqual([]);
     expect(matchStartSteps({ input: 'mouse', timingOffsetSaved: false })).toEqual([]);
+  });
+
+  it('calibrates the Phone before a Match when it has no Timing Offset of its own', () => {
+    expect(matchStartSteps({ input: 'phone', timingOffsetSaved: false })).toEqual(['calibration']);
+    expect(matchStartSteps({ input: 'phone', timingOffsetSaved: true })).toEqual([]);
   });
 });
 
@@ -77,6 +190,10 @@ describe('runOnboarding', () => {
       framing: step('framing'),
       handedness: step('handedness'),
       calibration: step('calibration'),
+      'phone-safety': step('phone-safety'),
+      'phone-pairing': step('phone-pairing'),
+      'phone-zeroing': step('phone-zeroing'),
+      'phone-ready': step('phone-ready'),
     }).then(() => (done = true));
 
     await Promise.resolve();

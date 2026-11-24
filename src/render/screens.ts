@@ -3,7 +3,9 @@
  * panel over the game, like the onboarding screens.
  *
  * - **Start screen**: Return Drill or Match. Match asks Difficulty (Novice,
- *   Intermediate, Expert) and length (1 Game or best of 3), then Start.
+ *   Intermediate, Expert) and length (1 Game or best of 3), then Start. It
+ *   also shows the Input (Camera or Phone, spec P3-e) with a button to change
+ *   it in the Input picker (`render/inputPicker.ts`).
  * - **Game over**: the winner, the final score, the longest Rally, the
  *   player's Returns and failed Shots, then Rematch, Change Difficulty or
  *   Back to start.
@@ -18,10 +20,12 @@
 
 import { DEFAULT_MATCH_CONFIG, gameModeFromSearch, type GameCore, type GameCoreOptions, type MatchEvent } from '../game/core.ts';
 import type { MatchConfig } from '../game/match.ts';
+import type { Input } from '../game/onboarding.ts';
 import type { Opponent, RallyEvent } from '../game/rally.ts';
 import type { ShotEvent } from '../game/shotResolver.ts';
 import type { Side } from '../game/side.ts';
 import { createBrain } from '../opponent/brain.ts';
+import { INPUT_LABEL } from './inputPicker.ts';
 import {
   DEFAULT_DIFFICULTY,
   DIFFICULTIES,
@@ -345,9 +349,18 @@ const STYLE = `
 .screens .modes button span { display: block; font-size: 15px; font-weight: 400; opacity: 0.8; }
 .screens button[aria-pressed="true"] { background: #ffd84a; color: #1d2230; border-color: #ffd84a; }
 .screens .primary { margin-top: 22px; }
+.screens .input { display: flex; gap: 12px; align-items: center; justify-content: center; flex-wrap: wrap; margin-top: 18px; }
+.screens .input button { padding: 6px 16px; font-size: 16px; }
 `;
 
-export function createScreens(): Screens {
+export interface ScreensOptions {
+  /** The Input in play, shown on the start screen; null (the developer mouse or a `?input=` flag) hides it. */
+  input?: () => Input | null;
+  /** The player pressed "Change" next to the Input. */
+  onChangeInput?: () => void;
+}
+
+export function createScreens(options: ScreensOptions = {}): Screens {
   const style = document.createElement('style');
   style.textContent = STYLE;
   const root = document.createElement('div');
@@ -405,6 +418,14 @@ export function createScreens(): Screens {
     }, FADE_MS);
   }
 
+  /** "Swinging with: Camera  [Change]", when the Input can be changed here. */
+  function inputRow(): Node[] {
+    const input = options.input?.() ?? null;
+    if (!input || !options.onChangeInput) return [];
+    const change = options.onChangeInput;
+    return [row('input', element('span', `Swinging with: ${INPUT_LABEL[input]}`, 'muted'), button('Change', () => change(), 'change-input'))];
+  }
+
   function startScreen(dispatch: (action: ScreenAction) => void): Node[] {
     return [
       element('h1', 'Ping Pong'),
@@ -415,6 +436,7 @@ export function createScreens(): Screens {
         button('Match', () => dispatch({ type: 'match' }), 'match', 'Play the Opponent'),
       ),
       element('p', 'Press Esc during play to come back here.', 'muted'),
+      ...inputRow(),
     ];
   }
 

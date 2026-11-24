@@ -77,6 +77,8 @@ export interface PhoneInputCore {
   packet(p: MotionPacket, tRecv: number): SwingEvent | null;
   /** The hand position from the latest packet, or null before the first Zeroing. `faceAngle` is the Forehand face's. */
   readonly position: HandPosition | null;
+  /** Whether a Zeroing has been applied (to the packet after it). */
+  readonly zeroed: boolean;
 }
 
 export function createPhoneInputCore(options: PhoneInputCoreOptions): PhoneInputCore {
@@ -118,6 +120,9 @@ export function createPhoneInputCore(options: PhoneInputCoreOptions): PhoneInput
     get position() {
       return position;
     },
+    get zeroed() {
+      return neutral !== null;
+    },
   };
 }
 
@@ -135,7 +140,10 @@ export function replayPhoneLog(entries: readonly PhoneLogEntry[], hand: Hand, pa
   return swings;
 }
 
-export interface PhoneInput extends SwingSource, HandPositionSource {}
+export interface PhoneInput extends SwingSource, HandPositionSource {
+  /** Whether the Phone has been Zeroed: a Zeroing arrived and the packet after it became neutral. */
+  readonly zeroed: boolean;
+}
 
 /**
  * The Phone Input on a paired link. `offset` puts Phone time on the laptop's
@@ -159,6 +167,9 @@ export function createPhoneInput(link: PhoneLink, now: () => number, offset: Clo
     subscribe: swings.subscribe,
     get latest() {
       return now() - lastRecv > PHONE_STALE_MS ? null : core.position;
+    },
+    get zeroed() {
+      return core.zeroed;
     },
   };
 }
