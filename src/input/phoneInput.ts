@@ -71,8 +71,13 @@ export interface PhoneInputCoreOptions {
 
 /** The Phone Input's pure part: Zeroing, the clock offset and the Swing detector. */
 export interface PhoneInputCore {
-  /** A Zeroing arrived: the next packet becomes neutral. */
+  /** A Zeroing arrived: the next packet becomes neutral, unless the Zero is held (see `setZeroHold`). */
   zero(): void;
+  /**
+   * While held (a Rally is on), a Zeroing waits: the Face Angle never jumps
+   * mid-Rally. Releasing it lets the waiting Zeroing apply to the next packet.
+   */
+  setZeroHold(held: boolean): void;
   /** One received packet (`tRecv`: laptop clock, ms). Returns the Swing whose Onset it is, if any. */
   packet(p: MotionPacket, tRecv: number): SwingEvent | null;
   /** The hand position from the latest packet, or null before the first Zeroing. `faceAngle` is the Forehand face's. */
@@ -87,11 +92,15 @@ export function createPhoneInputCore(options: PhoneInputCoreOptions): PhoneInput
   let detector = new PhoneSwingDetector(params, options.hand());
   let neutral: MotionPacket | null = null;
   let zeroPending = false;
+  let zeroHeld = false;
   let position: HandPosition | null = null;
 
   return {
     zero() {
       zeroPending = true;
+    },
+    setZeroHold(held) {
+      zeroHeld = held;
     },
     packet(p, tRecv) {
       offset.observe?.(p.tPhone, tRecv);
@@ -103,7 +112,7 @@ export function createPhoneInputCore(options: PhoneInputCoreOptions): PhoneInput
         detector = new PhoneSwingDetector(params, hand);
         if (neutral) detector.zero(neutral);
       }
-      if (zeroPending) {
+      if (zeroPending && !zeroHeld) {
         zeroPending = false;
         neutral = p;
         detector.zero(p);
@@ -143,6 +152,8 @@ export function replayPhoneLog(entries: readonly PhoneLogEntry[], hand: Hand, pa
 export interface PhoneInput extends SwingSource, HandPositionSource {
   /** Whether the Phone has been Zeroed: a Zeroing arrived and the packet after it became neutral. */
   readonly zeroed: boolean;
+  /** Hold a Zeroing back while a Rally is on; it applies to the first packet after the hold is released. */
+  setZeroHold(held: boolean): void;
 }
 
 /**
@@ -171,5 +182,6 @@ export function createPhoneInput(link: PhoneLink, now: () => number, offset: Clo
     get zeroed() {
       return core.zeroed;
     },
+    setZeroHold: core.setZeroHold,
   };
 }

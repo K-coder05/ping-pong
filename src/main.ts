@@ -70,7 +70,7 @@ import { handedness } from './game/handedness.ts';
 import { knobs } from './game/knobs.ts';
 import { matchStartSteps, onboardingSteps, phoneSafetyStore, runOnboarding, type Input, type InputMode } from './game/onboarding.ts';
 import { createPlayLogRecorder, type PlayLogRecorder } from './game/playLog.ts';
-import { contactPoint, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
+import { contactPoint, feedResult, knobResolverParams, type ShotEvent } from './game/shotResolver.ts';
 import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput, startCamera } from './input/installPoseInput.ts';
@@ -107,6 +107,7 @@ import { signalUrl } from './phone/signalUrl.ts';
 import { ClockSync } from './phone/clock.ts';
 import { mountLatencyOverlay } from './phone/latencyOverlay.ts';
 import type { LinkStatus } from './phone/types.ts';
+import { hapticFor } from './phone/haptics.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
 if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
@@ -311,6 +312,13 @@ const paddle = createPaddle({
   },
 });
 
+/**
+ * Whether a Rally is in progress, for holding a Phone Zeroing back (see
+ * `PhoneInput.setZeroHold`). In a Match: from a Shot (the Serve) to the Rally
+ * End or a Let. In Return Drill: from a Feed coming to the player to its result.
+ */
+let rallyOn = false;
+
 const FEEDBACK: Partial<Record<ShotEvent['type'], string>> = { early: 'Early!', late: 'Late!', miss: 'Miss' };
 
 /** The current session's Match rules (for the HUD) and the Opponent body's Difficulty. */
@@ -360,6 +368,22 @@ function startSession(choice: StartChoice): void {
   }
 
   const off: (() => void)[] = [];
+  rallyOn = false;
+  off.push(
+    session.onRally((e) => {
+      if (e.type === 'shot') rallyOn = true;
+      else if (e.type === 'end' || (e.type === 'serve' && e.result === 'let')) rallyOn = false;
+    }),
+    session.onIncoming((incoming) => {
+      if (session.mode === 'drill' && incoming.receiver === 'player') rallyOn = true;
+    }),
+    session.onShot((event) => {
+      if (session.mode === 'drill' && feedResult(event) !== null) rallyOn = false;
+      // An accepted Swing buzzes the Phone; Early, Late and Miss send nothing.
+      const ms = phone && !mouse ? hapticFor(event) : null;
+      if (ms !== null) phoneLink?.sendControl({ type: 'haptic', ms });
+    }),
+  );
   /**
    * Every resolver event, after the core has acted on it (the Return made the
    * ball in play, the Streak updated): the HUD shows the feedback and Streak;
@@ -621,6 +645,8 @@ function frame(now: number): void {
   // pause only stops new Feeds and Swings, so setting it first is the same as
   // setting it between the resolver and the Feeder.
   core.setPaused(corePaused());
+  // A Zeroing tapped mid-Rally waits for the Rally's end (a paused game has no Rally).
+  phone?.setZeroHold(rallyOn && !corePaused());
   hud.showHandLost((playing || calibrating) && handLost());
   core.frame({ nowMs: now, elapsedSeconds });
   hud.showCountdown(core.countdown);

@@ -12,6 +12,7 @@ import { answerPings } from './clock.ts';
 import { signalUrl } from './signalUrl.ts';
 import { openPhoneLink, statusLabel, type LinkError, type SignalingLink } from './link.ts';
 import { createSensorSource } from './sensors.ts';
+import { vibrateFor } from './haptics.ts';
 import { isRoomCode, normalizeRoomCode } from './signalProtocol.ts';
 
 const ERROR_TEXT: Record<LinkError, string> = {
@@ -104,6 +105,7 @@ function join(code: string) {
   answerPings(l, now);
   let count = 0;
   l.onControl((m) => {
+    vibrateFor(m, navigator);
     count++;
     receivedEl.textContent = `Received ${count} control message${count === 1 ? '' : 's'}, last: ${m.type}`;
   });

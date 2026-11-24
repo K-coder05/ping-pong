@@ -62,6 +62,28 @@ describe('createPhoneInputCore', () => {
     expect(c.position!.faceAngle).toBeCloseTo(30 * DEG, 6);
   });
 
+  it('defers a Zeroing held during a Rally to the first packet after the Rally', () => {
+    const c = core();
+    c.zero();
+    c.packet(still(0, 0, { hand: 'right', screenDownDeg: 20 }), 5000); // Zeroed here, between Rallies
+    c.setZeroHold(true); // a Rally begins
+    c.zero(); // tapped mid-Rally
+    c.packet(still(1, 10, { hand: 'right', screenDownDeg: 50 }), 5010);
+    c.packet(still(2, 20, { hand: 'right', screenDownDeg: 50 }), 5020);
+    expect(c.position!.faceAngle).toBeCloseTo(30 * DEG, 6); // no jump during the Rally
+    c.setZeroHold(false); // the Rally ends
+    c.packet(still(3, 30, { hand: 'right', screenDownDeg: 50 }), 5030);
+    expect(c.position!.faceAngle).toBeCloseTo(0, 6);
+  });
+
+  it('applies a Zeroing between Rallies to the next packet', () => {
+    const c = core();
+    c.setZeroHold(false);
+    c.zero();
+    c.packet(still(0, 0, { hand: 'right', screenDownDeg: 40 }), 5000);
+    expect(c.position!.faceAngle).toBeCloseTo(0, 6);
+  });
+
   it('puts Swings on the laptop clock, never later than they arrived', () => {
     const c = core();
     c.zero();
@@ -152,6 +174,18 @@ describe('createPhoneInput', () => {
     phone.packet(fast(4, 40, 25), 5040);
     expect(swings).toHaveLength(1);
     expect(swings[0]!.faceAngle).toBeCloseTo(25 * DEG, 6);
+  });
+
+  it('holds a Zero control message through a Rally and applies it afterwards', () => {
+    const phone = fakeLink();
+    const input = createPhoneInput(phone.link, () => 5000, naiveOffset(), () => 'right');
+    input.setZeroHold(true);
+    phone.control({ type: 'zero' }, 5000);
+    phone.packet(still(0, 0), 5000);
+    expect(input.zeroed).toBe(false);
+    input.setZeroHold(false);
+    phone.packet(still(1, 10), 5010);
+    expect(input.zeroed).toBe(true);
   });
 
   it('has no hand position once the Phone has gone quiet', () => {
