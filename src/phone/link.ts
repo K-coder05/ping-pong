@@ -4,13 +4,16 @@
  * Phone joins; the Phone joins by room code and answers. After that the two
  * talk directly over two data channels:
  *
- * - `motion`: unordered, no retransmits. A late packet is useless, so never wait for it.
+ * - `motion`: unordered, no retransmits, one binary `encodePacket` per message.
+ *   A late packet is useless, so never wait for it; packets sent before the
+ *   channel opens are dropped.
  * - `control`: reliable and ordered, JSON `ControlMessage`s.
  *
  * A thin wrapper over `WebSocket` and `RTCPeerConnection`; checked end to end
  * by `e2e/pairing.spec.ts`. ICE servers default to none: on the same network
  * host candidates are enough, and there is no TURN (ADR 0004).
  */
+import { PACKET_BYTES, decodePacket, encodePacket } from './packet.ts';
 import type { SignalErrorCode, ServerMessage } from './signalProtocol.ts';
 import type { ControlMessage, LinkStatus, MotionPacket, PhoneLink } from './types.ts';
 
@@ -143,7 +146,12 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     } else if (ch.label === 'motion') {
       motion = ch;
       ch.binaryType = 'arraybuffer';
-      // TODO(#38): decode with `decodePacket` from src/phone/packet.ts and call packetCbs with now().
+      ch.onmessage = (e) => {
+        const tRecv = now();
+        if (!(e.data instanceof ArrayBuffer) || e.data.byteLength !== PACKET_BYTES) return;
+        const p = decodePacket(e.data);
+        for (const cb of packetCbs) cb(p, tRecv);
+      };
     } else return;
     ch.onopen = () => checkOpen(from);
     ch.onclose = () => lost(from);
@@ -240,8 +248,9 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     onPacket: (cb) => subscribe(packetCbs, cb),
     onControl: (cb) => subscribe(controlCbs, cb),
     onError: (cb) => subscribe(errorCbs, cb),
-    sendPacket: () => {
-      // TODO(#38): `motion.send(encodePacket(p))` when the motion channel is open.
+    sendPacket: (p) => {
+      // Not open yet (or gone): drop it. A late packet is useless.
+      if (motion?.readyState === 'open') motion.send(encodePacket(p));
     },
     sendControl: (m) => {
       if (control?.readyState === 'open') control.send(JSON.stringify(m));

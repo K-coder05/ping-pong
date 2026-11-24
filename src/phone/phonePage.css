@@ -1,0 +1,151 @@
+/* phone.html: one full-screen tap area that never scrolls or zooms. */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  background: #0c0e14;
+  color: #e6e9ef;
+  font: 18px/1.4 system-ui, sans-serif;
+}
+
+.phone {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  text-align: center;
+  overflow: hidden;
+}
+
+.phone h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  color: #9aa3b2;
+}
+
+.phone form {
+  display: flex;
+  gap: 8px;
+}
+.phone form[hidden] {
+  display: none;
+}
+.phone input {
+  font: 600 28px ui-monospace, monospace;
+  width: 7.5em;
+  padding: 8px;
+  text-transform: uppercase;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.phone form button {
+  font-size: 20px;
+  padding: 8px 16px;
+}
+
+.phone .room {
+  font: 700 40px ui-monospace, monospace;
+  letter-spacing: 0.15em;
+}
+.phone .status {
+  font-size: 24px;
+  font-weight: 600;
+}
+.phone .status[data-state='connected'] {
+  color: #5fd38d;
+}
+.phone .status[data-state='disconnected'] {
+  color: #ff7a7a;
+}
+.phone .error {
+  color: #ff7a7a;
+}
+.phone .error:empty {
+  display: none;
+}
+
+.phone .start {
+  width: min(100%, 420px);
+  min-height: 30vh;
+  border: 0;
+  border-radius: 24px;
+  background: #2f6fed;
+  color: #fff;
+  font: 700 36px/1.2 system-ui, sans-serif;
+  cursor: pointer;
+}
+.phone .start:active {
+  background: #2258c4;
+}
+.phone .start[hidden],
+.phone [hidden] {
+  display: none;
+}
+
+.phone .denied {
+  max-width: 420px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #3a1d22;
+  color: #ffd6d6;
+  text-align: left;
+  font-size: 16px;
+}
+.phone .denied p {
+  margin: 0 0 8px;
+}
+.phone .denied p:last-child {
+  margin: 0;
+}
+
+.phone .rate {
+  font: 700 48px/1 ui-monospace, monospace;
+}
+.phone .rate small {
+  display: block;
+  margin-top: 4px;
+  font: 400 15px system-ui, sans-serif;
+  color: #9aa3b2;
+}
+
+.phone .hint {
+  max-width: 420px;
+  font-size: 15px;
+  color: #ffcf66;
+}
+.phone .hint:empty {
+  display: none;
+}
+
+.phone .grip {
+  max-width: 420px;
+  margin: 0;
+  font-size: 16px;
+  color: #ffcf66;
+}
+
+.phone .zero {
+  font-size: 22px;
+  padding: 14px 32px;
+  border-radius: 12px;
+}
+
+.phone .received {
+  font-size: 14px;
+  color: #9aa3b2;
+}

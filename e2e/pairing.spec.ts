@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { ControlMessage } from '../src/phone/types.ts';
+import type { ControlMessage, MotionPacket } from '../src/phone/types.ts';
 
 /** Pairing through the signaling server (docs/specs/p3.md, P3-a; #37). */
 
@@ -92,4 +92,99 @@ test('the laptop shows Disconnected when the Phone page closes', async ({ contex
 
   await phone.close();
   await expect(laptop.getByTestId('status')).toHaveText('Disconnected');
+});
+
+test('1,000 motion packets stream from the Phone page to the laptop with fewer than 1% lost', async ({ context }) => {
+  const laptop = await context.newPage();
+  const phone = await context.newPage();
+  const room = await openLaptop(laptop);
+  await phone.goto(`/phone.html?room=${room}`);
+  await expect(phone.getByTestId('status')).toHaveText('Connected');
+  await expect(laptop.getByTestId('status')).toHaveText('Connected');
+
+  await laptop.evaluate(() => {
+    const w = window as unknown as {
+      __packets: MotionPacket[];
+      __phoneLink: { onPacket(cb: (p: MotionPacket) => void): void };
+    };
+    w.__packets = [];
+    w.__phoneLink.onPacket((p) => w.__packets.push(p));
+  });
+
+  // Chrome has `requestPermission` too; headless answers 'prompt' unless the sensors are granted.
+  await context.grantPermissions(['accelerometer', 'gyroscope']);
+  await phone.getByRole('button', { name: 'Tap to start' }).click();
+  await expect(phone.getByTestId('rate')).toBeVisible();
+
+  // Synthetic sensor events through the real page: sensors.ts builds each packet, link.ts sends it.
+  // Paced like a fast Phone (2 every 5 ms), since a real one never sends 1,000 at once.
+  const N = 1000;
+  const MARK = 7777; // rotationRate beta: tells our events from any the browser fires itself
+  await phone.evaluate(
+    ({ n, mark }) =>
+      new Promise<void>((done) => {
+        window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { alpha: 10, beta: -20, gamma: 30 }));
+        let i = 0;
+        const tick = setInterval(() => {
+          for (let k = 0; k < 2 && i < n; k++, i++) {
+            window.dispatchEvent(
+              new DeviceMotionEvent('devicemotion', {
+                rotationRate: { alpha: i, beta: mark, gamma: -i },
+                accelerationIncludingGravity: { x: -1.5, y: 9.75, z: i / 4 },
+              }),
+            );
+          }
+          if (i >= n) {
+            clearInterval(tick);
+            done();
+          }
+        }, 5);
+      }),
+    { n: N, mark: MARK },
+  );
+
+  const received = () =>
+    laptop.evaluate((mark) => {
+      const w = window as unknown as { __packets: MotionPacket[] };
+      return w.__packets.filter((p) => p.rot[1] === mark);
+    }, MARK);
+  // Wait for the stream to drain, then count what arrived.
+  await expect.poll(async () => new Set((await received()).map((p) => p.rot[0])).size, { timeout: 10_000 }).toBeGreaterThanOrEqual(N * 0.99);
+  const got = await received();
+  const unique = new Set(got.map((p) => p.rot[0]));
+  expect(unique.size).toBeGreaterThanOrEqual(N * 0.99);
+  expect(unique.size).toBeLessThanOrEqual(N);
+
+  // Packets carry the right fields: the event's values, the cached orientation, seq and Phone time.
+  const first = got.find((p) => p.rot[0] === 1)!;
+  expect(first.rot).toEqual([1, MARK, -1]);
+  expect(first.acc).toEqual([-1.5, 9.75, 0.25]);
+  expect(first.ori).toEqual([10, -20, 30]);
+  expect(first.tPhone).toBeGreaterThan(0);
+  const seqs = got.map((p) => p.seq);
+  expect(new Set(seqs).size).toBe(seqs.length);
+
+  // Both screens show the live numbers.
+  await expect(laptop.getByTestId('packets')).toHaveText(/\d+ Hz · \d+ motion packets/);
+  await expect(phone.getByTestId('rate')).toHaveText(/\d+ Hz/);
+});
+
+test('a denied motion prompt shows how to re-enable it, and Try again asks again', async ({ page }) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __asks: number };
+    w.__asks = 0;
+    const deny = () => {
+      w.__asks++;
+      return Promise.resolve('denied');
+    };
+    Object.assign(DeviceMotionEvent, { requestPermission: deny });
+    Object.assign(DeviceOrientationEvent, { requestPermission: deny });
+  });
+  await page.goto('/phone.html');
+  await page.getByRole('button', { name: 'Tap to start' }).click();
+  await expect(page.getByTestId('denied')).toBeVisible();
+  await expect(page.getByTestId('denied')).toContainText('Motion access is blocked');
+  await expect(page.getByTestId('rate')).toBeHidden();
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __asks: number }).__asks)).toBe(4);
 });
