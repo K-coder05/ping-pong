@@ -1,20 +1,36 @@
 import { TRACKING_MIN_VISIBILITY } from '../game/constants.ts';
 import { handedness } from '../game/handedness.ts';
 import { timingOffsetStore } from '../game/timingOffsetStore.ts';
-import { createPoseInput } from '../input/poseInput.ts';
+import { swingInputMode } from '../input/mouseInput.ts';
+import { createPoseInput, type PoseInput } from '../input/poseInput.ts';
+import type { SwingSource } from '../input/types.ts';
+import { createPhoneLogRecorder } from '../phone/phoneLog.ts';
 import { askHandedness } from '../render/handednessPrompt.ts';
 import { createFrameLog } from '../sensing/frameLog.ts';
+import type { Hand } from '../sensing/landmarks.ts';
 import { startSensing, type Sensing } from '../sensing/sensing.ts';
 import { frameLogRow, type SensingFrame } from '../sensing/sensingFrame.ts';
-import { IDLE_MS, idlePhase, scoreSession, type SessionScore } from './detectionScore.ts';
+import { IDLE_MS } from './detectionScore.ts';
+import { createDetectionRun } from './detectionRun.ts';
 import { createMetronome } from './metronome.ts';
 import { createMetronomePresentation } from './metronomePresentation.ts';
+import { installToolPhone, PHONE_STEP_TEXT, type ToolPhone } from './toolPhone.ts';
 
 /**
  * Detection test (SPEC "Detection test"): a separate page (`detection.html`,
  * not linked from the game), run once per tester. 20 metronome ticks to swing
  * on, then 60 s of standing and talking; the results are detected/20 and
- * false triggers per minute, with the per-frame CSV for the session.
+ * false triggers per minute.
+ *
+ * Either Input (docs/specs/p3.md, P3-d), scored the same way
+ * (`detectionRun.ts` → `scoreSession`):
+ *
+ * - Camera (default): the game's pose Swing detector; the per-frame CSV for
+ *   the session; judged with the saved Timing Offset.
+ * - Phone (`?input=phone`): pairing, Zeroing, then the game's Phone Input with
+ *   clock sync (`L` shows the link overlay); the run's Phone log (JSONL) to
+ *   download. The Phone has no saved Timing Offset yet, so its Swings are
+ *   judged against the raw tick.
  */
 
 const TICK_COUNT = 20;
@@ -25,6 +41,9 @@ const SETTLE_MS = 400;
 const DEFAULT_ASPECT = 4 / 3;
 /** How long each detected Swing stays on screen. */
 const SWING_FLAG_MS = 600;
+
+const phoneMode = swingInputMode(window.location.search) === 'phone';
+const now = () => performance.now();
 
 document.head.append(
   Object.assign(document.createElement('style'), {
@@ -38,6 +57,8 @@ document.head.append(
 .dt .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .dt .swing-flag { position: absolute; right: 8px; bottom: 8px; padding: 4px 10px; border-radius: 6px; background: #ff4fa3; color: #fff; font-size: 22px; font-weight: 600; }
 .dt .banner { position: absolute; left: 0; right: 0; top: 0; padding: 8px 12px; background: rgba(0,0,0,0.6); font-size: 20px; text-align: center; }
+.dt .pairing-panel { position: absolute; inset: 0; overflow: auto; background: #0c0e14; }
+.dt .phone-step { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; font-size: 24px; }
 .dt .panel { margin: 12px 0; }
 .dt button { font: inherit; padding: 10px 18px; border-radius: 6px; cursor: pointer; margin-right: 8px; }
 .dt .big { font-size: 28px; margin: 4px 0; }
@@ -50,7 +71,7 @@ const root = document.createElement('main');
 root.className = 'dt';
 document.body.append(root);
 
-const title = Object.assign(document.createElement('h1'), { textContent: 'Detection test' });
+const title = Object.assign(document.createElement('h1'), { textContent: `Detection test · ${phoneMode ? 'Phone' : 'Camera'}` });
 const stage = Object.assign(document.createElement('div'), { className: 'stage' });
 const flash = Object.assign(document.createElement('div'), { className: 'flash' });
 /** Wrist dot over the mirrored video, so testers can see they're tracked. */
@@ -63,8 +84,8 @@ banner.hidden = true;
 const panel = Object.assign(document.createElement('div'), { className: 'panel' });
 root.append(title, stage, panel);
 
-function button(label: string, onClick: () => void): HTMLButtonElement {
-  const element = Object.assign(document.createElement('button'), { type: 'button', textContent: label });
+function button(label: string, onClick: () => void, disabled = false): HTMLButtonElement {
+  const element = Object.assign(document.createElement('button'), { type: 'button', textContent: label, disabled });
   element.addEventListener('click', onClick);
   return element;
 }
@@ -97,52 +118,74 @@ function drawWrist(canvas: HTMLCanvasElement, sensing: Sensing, frame: SensingFr
   ctx.stroke();
 }
 
-function downloadCsv(csv: string): void {
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+function download(text: string, type: string, extension: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = `detection-test-${new Date().toISOString().replaceAll(':', '-')}.csv`;
+  link.download = `detection-test-${phoneMode ? 'phone' : 'camera'}-${new Date().toISOString().replaceAll(':', '-')}.${extension}`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-type Phase = 'setup' | 'ticks' | 'idle' | 'done';
-
-async function main(): Promise<void> {
+/** The Camera's Swings, with the per-frame CSV. */
+async function cameraInput(): Promise<{ swings: PoseInput; sensing: Sensing } | null> {
   show(paragraph('Starting camera and pose model… (video stays on this device)'));
   let sensing: Sensing;
   try {
     sensing = await startSensing({ hand: handedness.hand ?? 'right' });
   } catch (error) {
     show(paragraph(`Camera unavailable: ${error instanceof Error ? error.message : String(error)}`));
-    return;
+    return null;
   }
   sensing.video.style.cssText = '';
   stage.append(sensing.video, wristCanvas, flash, banner, swingFlag);
-
-  const hand = handedness.hand ?? (await askHandedness());
-  handedness.set(hand);
-  sensing.setHand(hand);
-
-  const input = createPoseInput(sensing, {
+  const swings = createPoseInput(sensing, {
     aspect: () => {
       const { videoWidth, videoHeight } = sensing.video;
       return videoWidth && videoHeight ? videoWidth / videoHeight : DEFAULT_ASPECT;
     },
   });
+  return { swings, sensing };
+}
 
-  // Session state, reset per run.
-  let phase: Phase = 'setup';
+async function main(): Promise<void> {
+  let hand: Hand = handedness.hand ?? 'right';
+  let sensing: Sensing | null = null;
+  let poseInput: PoseInput | null = null;
+  let phone: ToolPhone | null = null;
+  let swings: SwingSource;
+  const phoneStepEl = Object.assign(document.createElement('div'), { className: 'phone-step' });
+
+  if (phoneMode) {
+    const pairingPanel = Object.assign(document.createElement('div'), { className: 'pairing-panel' });
+    stage.append(phoneStepEl, pairingPanel, flash, banner, swingFlag);
+    phone = installToolPhone({ pairingParent: pairingPanel, now, hand: () => hand });
+    swings = phone.input;
+  } else {
+    const camera = await cameraInput();
+    if (!camera) return;
+    ({ swings: poseInput, sensing } = camera);
+    swings = poseInput;
+  }
+
+  hand = handedness.hand ?? (await askHandedness());
+  handedness.set(hand);
+  sensing?.setHand(hand);
+
+  const run = createDetectionRun(swings);
   let log = createFrameLog();
-  let onsets: number[] = [];
-  let tickTimes: readonly number[] = [];
+  let phoneLog = createPhoneLogRecorder();
   let lastFrameT = -Infinity;
   let idle = { start: 0, end: 0 };
   /** The Timing Offset this run is judged with, read at Start. */
   let timingOffsetMs = 0;
 
+  /** The Timing Offset a run is judged with: the Camera's saved one; none yet for the Phone. */
+  const timingOffset = (): number => (phoneMode ? 0 : (timingOffsetStore.offsetMs ?? 0));
+
   /** Which Timing Offset a run will use (or used), for the setup and results screens. */
   const offsetNote = (): string => {
+    if (phoneMode) return 'The Phone has no saved Timing Offset yet: Swings are judged against the raw tick (±300 ms).';
     const saved = timingOffsetStore.offsetMs;
     return saved === null
       ? 'No Timing Offset saved: run Timing calibration in the game first, or Swings are judged against the raw tick.'
@@ -150,43 +193,62 @@ async function main(): Promise<void> {
   };
 
   let hideFlag: ReturnType<typeof setTimeout> | undefined;
-  input.subscribe((swing) => {
+  swings.subscribe((swing) => {
     swingFlag.textContent = swing.side === 'forehand' ? 'Forehand!' : 'Backhand!';
     swingFlag.hidden = false;
     clearTimeout(hideFlag);
     hideFlag = setTimeout(() => (swingFlag.hidden = true), SWING_FLAG_MS);
   });
-  input.subscribe((swing) => {
-    if (phase === 'ticks' || phase === 'idle') onsets.push(swing.t);
-  });
 
-  sensing.subscribe((frame) => {
-    drawWrist(wristCanvas, sensing, frame);
-    if (phase === 'setup' || phase === 'done') return;
-    const reading = input.read(frame);
-    let tick: number | null = null;
-    // A tick belongs to the first frame captured at or after its time.
-    for (let i = 0; i < tickTimes.length; i++) {
-      const time = tickTimes[i]!;
-      if (time > lastFrameT && time <= frame.t) tick = i;
-    }
-    lastFrameT = frame.t;
-    log.push({
-      ...frameLogRow(frame),
-      phase,
-      tick,
-      // Exact tick time: the frame is up to one frame later (log replay, #12).
-      tickTime: tick === null ? null : tickTimes[tick],
-      px: reading?.p.x ?? null,
-      py: reading?.p.y ?? null,
-      u: reading?.u ?? null,
-      s: reading?.s ?? null,
-      sStroke: reading?.sStroke ?? null,
-      vertSpeed: reading?.vertSpeed ?? null,
-      side: reading?.side ?? null,
-      onset: reading ? (reading.swing ? 1 : 0) : null,
+  const recording = () => run.phase === 'ticks' || run.phase === 'idle';
+  if (phone) {
+    const p = phone;
+    p.link.onPacket((packet, tRecv) => {
+      if (recording()) phoneLog.record(packet, tRecv);
     });
-  });
+    p.link.onControl((m, tRecv) => {
+      if (recording() && m.type === 'zero') phoneLog.zero(tRecv);
+    });
+    const showStep = () => {
+      phoneStepEl.textContent = PHONE_STEP_TEXT[p.step()];
+      if (run.phase === 'setup') intro(); // Start waits for the Phone to be Zeroed
+    };
+    p.onChange(showStep);
+    phoneStepEl.textContent = PHONE_STEP_TEXT[p.step()];
+  }
+
+  if (sensing && poseInput) {
+    const camera = sensing;
+    const pose = poseInput;
+    camera.subscribe((frame) => {
+      drawWrist(wristCanvas, camera, frame);
+      if (!recording()) return;
+      const reading = pose.read(frame);
+      const tickTimes = run.tickTimes;
+      let tick: number | null = null;
+      // A tick belongs to the first frame captured at or after its time.
+      for (let i = 0; i < tickTimes.length; i++) {
+        const time = tickTimes[i]!;
+        if (time > lastFrameT && time <= frame.t) tick = i;
+      }
+      lastFrameT = frame.t;
+      log.push({
+        ...frameLogRow(frame),
+        phase: run.phase,
+        tick,
+        // Exact tick time: the frame is up to one frame later (log replay, #12).
+        tickTime: tick === null ? null : tickTimes[tick],
+        px: reading?.p.x ?? null,
+        py: reading?.p.y ?? null,
+        u: reading?.u ?? null,
+        s: reading?.s ?? null,
+        sStroke: reading?.sStroke ?? null,
+        vertSpeed: reading?.vertSpeed ?? null,
+        side: reading?.side ?? null,
+        onset: reading ? (reading.swing ? 1 : 0) : null,
+      });
+    });
+  }
 
   const presentation = createMetronomePresentation({ flashElement: flash });
   const metronome = createMetronome({
@@ -201,46 +263,54 @@ async function main(): Promise<void> {
     onEnd: startIdle,
   });
 
+  const changeHand = () =>
+    void askHandedness().then((h) => {
+      hand = h;
+      handedness.set(h);
+      sensing?.setHand(h);
+      intro();
+    });
+
   function intro(): void {
-    phase = 'setup';
+    run.reset();
     banner.hidden = true;
+    const phoneReady = !phone || phone.step() === 'ready';
     show(
-      paragraph('Stand back until your whole swing fits in the picture.', 'big'),
+      paragraph(phoneMode ? 'Hold the Phone in your hitting hand, gripped firmly, with space around you.' : 'Stand back until your whole swing fits in the picture.', 'big'),
       paragraph(
         `Part 1: ${TICK_COUNT} ticks (flash and click). Swing once on each tick, like a forehand or backhand return. ` +
-          `Part 2: then stand still and talk normally for ${IDLE_MS / 1000} s without swinging. Video stays on this device.`,
+          `Part 2: then stand still and talk normally for ${IDLE_MS / 1000} s without swinging.` +
+          (phoneMode ? ' Keep holding the Phone.' : ' Video stays on this device.'),
         'muted',
       ),
       paragraph(offsetNote(), 'muted'),
-      button('Start', () => void begin()),
-      button(`Hand: ${hand} (change)`, () => void askHandedness().then((h) => { handedness.set(h); sensing.setHand(h); intro(); })),
+      ...(phoneReady ? [] : [paragraph(`Start unlocks once the Phone is Zeroed. ${PHONE_STEP_TEXT[phone!.step()]}`, 'muted')]),
+      button('Start', () => void begin(), !phoneReady),
+      button(`Hand: ${hand} (change)`, changeHand),
     );
   }
 
   async function begin(): Promise<void> {
     await presentation.unlock().catch(() => undefined); // silent if audio is unavailable; the flash still works
     log = createFrameLog();
-    onsets = [];
-    timingOffsetMs = timingOffsetStore.offsetMs ?? 0;
+    phoneLog = createPhoneLogRecorder();
     lastFrameT = -Infinity;
-    phase = 'ticks';
     banner.hidden = false;
     banner.textContent = 'Get ready…';
     show(paragraph(`Swing on every tick. ${TICK_COUNT} ticks, one every ${(TICK_INTERVAL_MS / 1000).toFixed(1)} s.`));
+    timingOffsetMs = timingOffset();
     metronome.start();
-    tickTimes = metronome.tickTimes;
+    run.begin(metronome.tickTimes, timingOffsetMs);
   }
 
   function startIdle(): void {
-    const lastTick = tickTimes[tickTimes.length - 1]!;
-    idle = idlePhase(lastTick);
-    phase = 'idle';
-    banner.textContent = "Relax: arm down, stand and talk normally";
+    idle = run.startIdle();
+    banner.textContent = 'Relax: arm down, stand and talk normally';
     show(paragraph('Idle phase: every detected swing counts as a false trigger.', 'muted'));
     const countdown = setInterval(() => {
-      const left = Math.max(0, Math.ceil((idle.end - performance.now()) / 1000));
+      const left = Math.max(0, Math.ceil((idle.end - now()) / 1000));
       banner.textContent = `Stand and talk normally. Don't swing. ${left} s`;
-      if (performance.now() >= idle.end + SETTLE_MS) {
+      if (now() >= idle.end + SETTLE_MS) {
         clearInterval(countdown);
         finish();
       }
@@ -248,14 +318,17 @@ async function main(): Promise<void> {
   }
 
   function finish(): void {
-    phase = 'done';
+    const score = run.finish();
     banner.hidden = true;
-    const score: SessionScore = scoreSession({ tickTimes, onsets, idle, timingOffsetMs });
     show(
       paragraph(`Detected: ${score.detected} / ${score.total}`, 'big'),
       paragraph(`False triggers: ${score.falseTriggersPerMinute.toFixed(1)} per minute (${score.falseTriggers} in ${IDLE_MS / 1000} s)`, 'big'),
-      paragraph(`${log.length} frames logged · hand: ${hand} · Timing Offset: ${Math.round(timingOffsetMs)} ms`, 'muted'),
-      button('Download CSV', () => downloadCsv(log.toCsv())),
+      phoneMode
+        ? paragraph(`Phone · hand: ${hand} · Timing Offset: ${Math.round(timingOffsetMs)} ms`, 'muted')
+        : paragraph(`${log.length} frames logged · hand: ${hand} · Timing Offset: ${Math.round(timingOffsetMs)} ms`, 'muted'),
+      phoneMode
+        ? button('Download Phone log', () => download(phoneLog.toJsonl(), 'application/x-ndjson', 'jsonl'))
+        : button('Download CSV', () => download(log.toCsv(), 'text/csv', 'csv')),
       button('Run again', intro),
     );
   }

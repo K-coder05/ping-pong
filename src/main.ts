@@ -65,7 +65,7 @@ import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput, startCamera } from './input/installPoseInput.ts';
 import { installMouseInput, swingInputMode, type MouseInput } from './input/mouseInput.ts';
-import { createPhoneInput, naiveOffset, type PhoneInput } from './input/phoneInput.ts';
+import { createPhoneInput, type PhoneInput } from './input/phoneInput.ts';
 import { knobSwingParams } from './input/poseInput.ts';
 import type { SwingSource } from './input/types.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
@@ -93,6 +93,9 @@ import { sharedSensing } from './sensing/shared.ts';
 import { openLaptopLink } from './phone/link.ts';
 import { mountPairing } from './phone/pairing.ts';
 import { signalUrl } from './phone/signalUrl.ts';
+import { ClockSync } from './phone/clock.ts';
+import { mountLatencyOverlay } from './phone/latencyOverlay.ts';
+import type { LinkStatus } from './phone/types.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
 if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
@@ -150,7 +153,15 @@ function installPhone(): PhoneInput {
   show();
   link.onStatus(show);
   installPhoneLogDownload({ registry: knobs, link, recording: () => debug.active });
-  return createPhoneInput(link, now, naiveOffset(), hittingHand);
+  // Phone time onto the laptop's clock (P3-d): one ClockSync per link, running while the Phone is connected.
+  // Swings before its first full round use the provisional estimate (the best answer so far, within half a
+  // round trip): it is in place within one round trip of connecting, long before the player can Zero and swing.
+  const sync = new ClockSync(link, now);
+  const followLink = (s: LinkStatus) => (s === 'connected' || s === 'relay' ? sync.start() : sync.stop());
+  link.onStatus(followLink);
+  followLink(link.status());
+  mountLatencyOverlay(document.body, link, sync, now); // hidden; L shows it
+  return createPhoneInput(link, now, sync, hittingHand);
 }
 
 /** The one SwingSource the game listens to: the mouse or Phone if on, otherwise pose. */
