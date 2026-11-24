@@ -3,24 +3,30 @@
  * against each Difficulty, headless, to tune DIFFICULTIES before playtests.
  *
  *   npm run balance -- --matches 500 [--seed 1] [--best-of 1|3] [--jobs N]
- *     [--difficulty novice|intermediate|expert] [--model first-timer|you]
- *   npm run balance -- --sweep mistakeBase=0.05:0.25:0.05 --difficulty novice --model first-timer
+ *     [--difficulty novice|intermediate|expert] [--model first-timer|you] [--input camera|phone] [--face-angle-sd 15]
+ *   npm run balance -- --sweep mistakeBase=0.05:0.25:0.05 --difficulty novice --model first-timer [--input phone]
  *
- * Every Difficulty plays every model (or only those named) and it prints one
- * row per matchup: the Opponent's Match win rate, the average Rally length
+ * Every Difficulty plays every model with each Input (or only those named),
+ * and it prints one row per matchup: the Opponent's Match win rate, the average Rally length
  * (Shots per Rally, the Serve included, Lets left out), the average Points per
  * Game, and the Opponent's mistake rate (Pop-ups, Errors and Whiffs per Shot
  * it chose; Serves aren't counted, the Opponent never Faults), plus the
  * player's errors and the Points won with Shots the Opponent can't reach,
  * for comparison. `--sweep`
  * grid-searches one DifficultyParams field of one Difficulty, on a copy:
- * DIFFICULTIES itself is never changed.
+ * DIFFICULTIES itself is never changed; it plays the Camera unless `--input`
+ * names the Phone.
  *
  * Models: `fixtures/players/<name>.json` (written by `npm run fit-player`)
  * when it exists, else the PROVISIONAL guesses below, flagged in the output.
+ * Each model plays with the Camera as fitted, and with the Phone (spec P3-f):
+ * the same model, but each Swing carries a Face Angle that matches the
+ * incoming Spin with Gaussian error (PHONE_FACE_ANGLE_SD_DEG, or
+ * `--face-angle-sd <degrees>`), so Face Angle rather than Lift sets and
+ * answers Spin (ADR 0003).
  *
  * Match i of every matchup uses the same seeds (from --seed and i), so rows
- * differ only by Difficulty and model, and the same flags print the same
+ * differ only by Difficulty, model and Input, and the same flags print the same
  * table. Matches run in chunks on a pool of worker threads (`--jobs`, all
  * cores by default); the tallies are sums, so the table doesn't depend on
  * how they are split. The run time goes to stderr, outside the table.
@@ -38,7 +44,7 @@ import { knobResolverParams } from '../src/game/shotResolver.ts';
 import { createBrain, incomingDifficulty, mistakeChance } from '../src/opponent/brain.ts';
 import { DIFFICULTIES, DIFFICULTY_ORDER, type Difficulty, type DifficultyParams } from '../src/opponent/difficulty.ts';
 import type { PlayerModel } from '../src/tools/fitPlayer.ts';
-import { createSimPlayer } from '../src/tools/simPlayer.ts';
+import { createSimPlayer, type PhoneModel } from '../src/tools/simPlayer.ts';
 import { makeRng } from '../src/util/rng.ts';
 
 /**
@@ -52,6 +58,18 @@ const PROVISIONAL: Record<string, PlayerModel> = {
   you: { name: 'you', timingMeanMs: 0, timingSdMs: 45, detectRate: 0.95, speedMean: 6.8, speedSd: 0.9, vertPathMean: 1.2, vertPathSd: 0.9 },
 };
 const MODEL_ORDER = ['first-timer', 'you'];
+
+/** The Inputs every model plays with (GLOSSARY "Input"). */
+type Input = 'camera' | 'phone';
+const INPUT_ORDER: Input[] = ['camera', 'phone'];
+const INPUT_NAME: Record<Input, string> = { camera: 'Camera', phone: 'Phone' };
+
+/**
+ * How far the Phone model's Face Angle strays from the one that matches the
+ * incoming Spin, degrees (one standard deviation). Spec P3-f's starting guess,
+ * until real Phone logs measure it.
+ */
+const PHONE_FACE_ANGLE_SD_DEG = 15;
 
 /** Spec P2-g2 targets (guesses; adjust after real playtests): the Opponent's Match win rate, as [min, max]. */
 const TARGETS: Partial<Record<`${Difficulty} vs ${string}`, [number, number]>> = {
@@ -72,11 +90,15 @@ interface Args {
   jobs: number;
   difficulties: Difficulty[];
   models: string[];
+  /** The Inputs named with --input; null for all of them (the Camera alone in a sweep). */
+  inputs: Input[] | null;
+  /** The Phone model's Face Angle error, degrees (sd). */
+  faceAngleSdDeg: number;
   sweep: { field: keyof DifficultyParams; values: number[] } | null;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { matches: 500, seed: 1, bestOf: 1, jobs: availableParallelism(), difficulties: [...DIFFICULTY_ORDER], models: [...MODEL_ORDER], sweep: null };
+  const args: Args = { matches: 500, seed: 1, bestOf: 1, jobs: availableParallelism(), difficulties: [...DIFFICULTY_ORDER], models: [...MODEL_ORDER], inputs: null, faceAngleSdDeg: PHONE_FACE_ANGLE_SD_DEG, sweep: null };
   const value = (i: number, flag: string) => {
     const v = argv[i];
     if (v === undefined) throw new Error(`${flag} needs a value`);
@@ -96,8 +118,17 @@ function parseArgs(argv: string[]): Args {
       if (!DIFFICULTY_ORDER.includes(d)) throw new Error(`--difficulty must be one of ${DIFFICULTY_ORDER.join(', ')}`);
       args.difficulties = [d];
     } else if (flag === '--model') args.models = [value(++i, flag)];
-    else if (flag === '--sweep') args.sweep = parseSweep(value(++i, flag));
-    else throw new Error(`Unknown flag ${flag}. Flags: --matches, --seed, --best-of, --jobs, --difficulty, --model, --sweep`);
+    else if (flag === '--input') {
+      const input = value(++i, flag) as Input;
+      if (!INPUT_ORDER.includes(input)) throw new Error(`--input must be one of ${INPUT_ORDER.join(', ')}`);
+      args.inputs = [input];
+    } else if (flag === '--face-angle-sd') {
+      const raw = value(++i, flag);
+      const sd = Number(raw);
+      if (!Number.isFinite(sd) || sd < 0) throw new Error(`${flag} needs a number of degrees, 0 or more, got "${raw}"`);
+      args.faceAngleSdDeg = sd;
+    } else if (flag === '--sweep') args.sweep = parseSweep(value(++i, flag));
+    else throw new Error(`Unknown flag ${flag}. Flags: --matches, --seed, --best-of, --jobs, --difficulty, --model, --input, --face-angle-sd, --sweep`);
   }
   if (args.sweep && (args.difficulties.length !== 1 || args.models.length !== 1)) {
     throw new Error('--sweep needs one --difficulty and one --model');
@@ -193,8 +224,8 @@ function matchSeed(seed: number, index: number, stream: number): number {
   return (h ^ (h >>> 16)) >>> 0;
 }
 
-/** Play one Match of `model` against the Opponent at `params` and add it to `tally`. */
-function playMatch(params: DifficultyParams, model: PlayerModel, config: MatchConfig, seed: number, index: number, tally: Tally): void {
+/** Play one Match of `model` (with the Phone when `phone` is set, else the Camera) against the Opponent at `params` and add it to `tally`. */
+function playMatch(params: DifficultyParams, model: PlayerModel, phone: PhoneModel | null, config: MatchConfig, seed: number, index: number, tally: Tally): void {
   const core = createGameCore({
     random: makeRng(matchSeed(seed, index, 0)),
     resolverParams: knobResolverParams,
@@ -203,7 +234,7 @@ function playMatch(params: DifficultyParams, model: PlayerModel, config: MatchCo
     opponent: countingBrain(params, tally),
     match: config,
   });
-  const player = createSimPlayer(model, core, makeRng(matchSeed(seed, index, 1)));
+  const player = createSimPlayer(model, core, makeRng(matchSeed(seed, index, 1)), phone ? { phone } : {});
   let nowMs = 0;
   player.subscribe((swing) => core.swing(swing, nowMs));
   let shots = 0;
@@ -242,11 +273,12 @@ function playMatch(params: DifficultyParams, model: PlayerModel, config: MatchCo
   if (core.match.winner === 'opponent') tally.opponentWins++;
 }
 
-/** A chunk of one row's Matches, played in a worker: Matches [from, to) of `params` against `model`. */
+/** A chunk of one row's Matches, played in a worker: Matches [from, to) of `params` against `model`, with the Phone if `phone` is set. */
 interface Job {
   row: number;
   params: DifficultyParams;
   model: PlayerModel;
+  phone: PhoneModel | null;
   bestOf: 1 | 3;
   seed: number;
   from: number;
@@ -259,7 +291,7 @@ const CHUNK = 25;
 function runJob(job: Job): Tally {
   const tally = emptyTally();
   const config: MatchConfig = { pointsToWin: 11, winBy: 2, bestOf: job.bestOf };
-  for (let i = job.from; i < job.to; i++) playMatch(job.params, job.model, config, job.seed, i, tally);
+  for (let i = job.from; i < job.to; i++) playMatch(job.params, job.model, job.phone, config, job.seed, i, tally);
   return tally;
 }
 
@@ -268,11 +300,12 @@ function addTally(into: Tally, t: Tally): void {
 }
 
 /** Play every row's Matches on a pool of `jobs` worker threads; one Tally per row, in order. */
-async function playRows(rows: { params: DifficultyParams; model: PlayerModel }[], args: Args): Promise<Tally[]> {
+async function playRows(rows: { params: DifficultyParams; model: PlayerModel; input: Input }[], args: Args): Promise<Tally[]> {
   const queue: Job[] = [];
-  rows.forEach(({ params, model }, row) => {
+  rows.forEach(({ params, model, input }, row) => {
+    const phone: PhoneModel | null = input === 'phone' ? { faceAngleSdDeg: args.faceAngleSdDeg } : null;
     for (let from = 0; from < args.matches; from += CHUNK) {
-      queue.push({ row, params, model, bestOf: args.bestOf, seed: args.seed, from, to: Math.min(args.matches, from + CHUNK) });
+      queue.push({ row, params, model, phone, bestOf: args.bestOf, seed: args.seed, from, to: Math.min(args.matches, from + CHUNK) });
     }
   });
   const tallies = rows.map(emptyTally);
@@ -349,6 +382,10 @@ async function main(): Promise<void> {
   for (const { name, source, model } of models) {
     console.log(`  ${name}: ${source}: timing ${model.timingMeanMs} ± ${model.timingSdMs} ms, detect ${model.detectRate}, speed ${model.speedMean} ± ${model.speedSd}, vertPath ${model.vertPathMean} ± ${model.vertPathSd}`);
   }
+  const inputs = args.inputs ?? (args.sweep ? ['camera' as const] : INPUT_ORDER);
+  if (inputs.includes('phone')) {
+    console.log(`  With the Phone: the same models, Face Angle matching the incoming Spin ± ${args.faceAngleSdDeg}° (sd), vertPath 0`);
+  }
   console.log('');
 
   const STATS = ['Opponent wins (95%)', 'Rally length', 'Points/Game', 'Opponent mistakes', 'Pop-up / Error / Whiff', 'Player errors', 'Unreachable Points'];
@@ -356,18 +393,21 @@ async function main(): Promise<void> {
     const { field, values } = args.sweep;
     const difficulty = args.difficulties[0]!;
     const { name, model } = models[0]!;
-    console.log(`Sweep: ${difficulty} ${field} (now ${DIFFICULTIES[difficulty][field]}) vs ${name}`);
+    const input = inputs[0]!;
+    console.log(`Sweep: ${difficulty} ${field} (now ${DIFFICULTIES[difficulty][field]}) vs ${name} with the ${INPUT_NAME[input]}`);
     console.log('');
-    const tallies = await playRows(values.map((v) => ({ params: { ...DIFFICULTIES[difficulty], [field]: v }, model })), args);
+    const tallies = await playRows(values.map((v) => ({ params: { ...DIFFICULTIES[difficulty], [field]: v }, model, input })), args);
     printTable([field, ...STATS, 'Target'], tallies.map((t, i) => [String(values[i]), ...cells(t), targetCell(difficulty, name, t)]));
   } else {
-    const matchups = args.difficulties.flatMap((difficulty) => models.map(({ name, model }) => ({ difficulty, name, model, params: DIFFICULTIES[difficulty] })));
+    const matchups = args.difficulties.flatMap((difficulty) =>
+      models.flatMap(({ name, model }) => inputs.map((input) => ({ difficulty, name, model, input, params: DIFFICULTIES[difficulty] }))),
+    );
     const tallies = await playRows(matchups, args);
     printTable(
-      ['Difficulty', 'Player', ...STATS, 'Target'],
+      ['Difficulty', 'Player', 'Input', ...STATS, 'Target'],
       tallies.map((t, i) => {
-        const { difficulty, name } = matchups[i]!;
-        return [difficulty, name, ...cells(t), targetCell(difficulty, name, t)];
+        const { difficulty, name, input } = matchups[i]!;
+        return [difficulty, name, INPUT_NAME[input], ...cells(t), targetCell(difficulty, name, t)];
       }),
     );
   }

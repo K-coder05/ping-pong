@@ -8,6 +8,11 @@
  * Ideal Time (`startToss`): a Swing in the Hit Window serves, planned by the
  * same timing, speed and Lift rules as a Return (`planServe`), so a badly
  * timed or over-hit Serve Faults only because its target moves long or wide.
+ *
+ * Spin control depends on the Input (ADR 0003, spec P3-f): a Swing without a
+ * `faceAngle` (the Camera) sets Topspin and answers Spin with Lift; a Swing
+ * with one (the Phone) does both with its Face Angle instead, for Returns and
+ * Serves alike, and ignores Lift.
  */
 
 import type { SwingEvent } from '../input/types.ts';
@@ -42,6 +47,7 @@ import {
   TABLE_TOP_Y,
   TIMING_OFFSET_MS,
 } from './constants.ts';
+import { faceAngleShare, knobFaceAngleParams, type FaceAngleParams } from './faceAngle.ts';
 import { revsToRadPerSec } from '../physics/spin.ts';
 import { judgeReturnFlight, type ReturnFlightResult } from './score.ts';
 import { solveServe, type ServeIntent } from './serve.ts';
@@ -94,8 +100,10 @@ export interface ReturnInput {
   /** Corrected Swing Onset minus Ideal Time, ms (negative = early); within the Hit Window. */
   delta: number;
   peakSpeed: number;
-  /** The Swing's `vertPath`: vertical wrist speed at Onset, shoulder widths/s, + up. */
+  /** The Swing's `vertPath`: vertical wrist speed at Onset, shoulder widths/s, + up. Ignored when there is a `faceAngle`. */
   vertPath: number;
+  /** The Swing's Face Angle at Onset, radians from Zero, + closed (Phone only). When set, it sets and answers Spin instead of Lift. */
+  faceAngle?: number;
   side: SwingEvent['side'];
   hand: Hand;
   /** Topspin of the incoming Shot being returned, rad/s (negative = Backspin). */
@@ -110,9 +118,13 @@ export interface ReturnPlan {
   flightTime: number;
   /** Timing quality q = 1 − |delta| / W: 1 at the Ideal Time, 0 at the edge of the window. */
   quality: number;
-  /** The Swing's Lift, 0 (flat) to 1 (full). */
+  /** The Swing's Lift, 0 (flat) to 1 (full); 0 for a Swing with a Face Angle, which ignores Lift. */
   lift: number;
-  /** Topspin of the Return, rad/s: Lift × the Return-Topspin knob. Returns never carry Backspin or Sidespin. */
+  /**
+   * Topspin of the Return, rad/s (negative = Backspin). Without a Face Angle: Lift × the
+   * Return-Topspin knob, never Backspin. With one: Topspin when closed, Backspin when open
+   * (`faceAngleSpin`). Returns never carry Sidespin.
+   */
   topspin: number;
 }
 
@@ -128,11 +140,27 @@ export function liftOf(vertPath: number, minRise: number, liftFull: number): num
 }
 
 /**
+ * Topspin (rad/s, negative = Backspin) set by a Swing's Face Angle (spec P3-f, ADR 0003): with f
+ * its Face Angle share, a closed face (f > 0) gives f × RETURN_TOPSPIN_MAX_REVS of Topspin, an
+ * open one (f < 0) |f| × RETURN_BACKSPIN_MAX_REVS of Backspin, both scaled by the speed factor
+ * min(1, peakSpeed / PHONE_SPEED_FULL). Lift plays no part, and there is never Sidespin.
+ */
+export function faceAngleSpin(faceAngle: number, peakSpeed: number, params: ResolverParams, face: FaceAngleParams): number {
+  const f = faceAngleShare(faceAngle, face);
+  const speed = face.speedFull > 0 ? clamp01(peakSpeed / face.speedFull) : 1;
+  const maxRevs = f > 0 ? params.returnTopspinMaxRevs : face.backspinMaxRevs;
+  // + 0 turns −0 (an open face at zero speed) into 0.
+  return f * speed * revsToRadPerSec(maxRevs) + 0;
+}
+
+/**
  * Pick a Return's landing spot and pace (SPEC "From Swing to Return"). Timing
  * picks the direction: early goes cross-court, late down the line, mirrored
- * for a Backhand and for a left-hander.
+ * for a Backhand and for a left-hander. A Swing with a Face Angle sets and
+ * answers Spin with it (`faceAngleSpin`, `answerSpinWithFaceAngle`), read from
+ * `face` (the live knobs if omitted); otherwise Lift does (`answerSpin`).
  */
-export function planReturn(input: ReturnInput, params: ResolverParams, random: () => number): ReturnPlan {
+export function planReturn(input: ReturnInput, params: ResolverParams, random: () => number, face?: FaceAngleParams): ReturnPlan {
   const W = params.hitWindowMs;
   const quality = 1 - Math.abs(input.delta) / W;
   // World +x is the player's right. A right-hander's Forehand is struck on
@@ -150,10 +178,18 @@ export function planReturn(input: ReturnInput, params: ResolverParams, random: (
   // Natural variation, none for a perfectly timed Swing. It moves the target,
   // never the launch velocity (ADR 0001).
   const scatter = () => (2 * random() - 1) * params.scatterM * (1 - quality);
+  const targetX = x + scatter();
+  const scattered = depth - scatter();
+  if (input.faceAngle !== undefined) {
+    const faceParams = face ?? knobFaceAngleParams();
+    const topspin = faceAngleSpin(input.faceAngle, input.peakSpeed, params, faceParams);
+    const f = faceAngleShare(input.faceAngle, faceParams);
+    const finalDepth = answerSpinWithFaceAngle(scattered, input.incomingTopspin, f, params);
+    return { target: { x: targetX, z: -finalDepth }, flightTime, quality, lift: 0, topspin };
+  }
   const lift = liftOf(input.vertPath, params.minRise, params.liftFull);
   const topspin = lift * revsToRadPerSec(params.returnTopspinMaxRevs);
-  const targetX = x + scatter();
-  const finalDepth = answerSpin(depth - scatter(), input.incomingTopspin, lift, params);
+  const finalDepth = answerSpin(scattered, input.incomingTopspin, lift, params);
   return { target: { x: targetX, z: -finalDepth }, flightTime, quality, lift, topspin };
 }
 
@@ -173,15 +209,15 @@ export interface ServePlan extends ReturnPlan {
 /**
  * Plan the player's Serve struck from `from` (spec P2-f2): the target on the
  * Opponent's half by the same rules as a Return (`planReturn`, with the same
- * random draws), so timing picks the direction, speed the depth, Lift the
- * Topspin, and a Swing late or early in the window, or a fast one, moves the
- * target long (ADR 0001). The first bounce is on the line from the strike to
- * the target, SERVE_BOUNCE1_Z_SHORT from the net for a short target down to
- * SERVE_BOUNCE1_Z_DEEP for a deep one, where a Serve from the toss can be
- * solved.
+ * random draws), so timing picks the direction, speed the depth, Lift (or,
+ * with the Phone, the Face Angle) the Spin, and a Swing late or early in the
+ * window, or a fast one, moves the target long (ADR 0001). The first bounce
+ * is on the line from the strike to the target, SERVE_BOUNCE1_Z_SHORT from
+ * the net for a short target down to SERVE_BOUNCE1_Z_DEEP for a deep one,
+ * where a Serve from the toss can be solved.
  */
-export function planServe(input: ServeInput, from: TablePoint, params: ResolverParams, random: () => number): ServePlan {
-  const plan = planReturn({ ...input, incomingTopspin: 0 }, params, random);
+export function planServe(input: ServeInput, from: TablePoint, params: ResolverParams, random: () => number, face?: FaceAngleParams): ServePlan {
+  const plan = planReturn({ ...input, incomingTopspin: 0 }, params, random, face);
   const { target } = plan;
   const deep = clamp01((-target.z - SERVE_SHORT_DEPTH_M) / (SERVE_DEEP_DEPTH_M - SERVE_SHORT_DEPTH_M));
   const z = lerp(SERVE_BOUNCE1_Z_SHORT, SERVE_BOUNCE1_Z_DEEP, deep);
@@ -217,14 +253,36 @@ export function solvePlannedServe(solve: typeof solveServe, from: Vec3, intent: 
  * depth including scatter, so the minimum holds for the target the solver gets.
  */
 function answerSpin(depth: number, incomingTopspin: number, lift: number, params: ResolverParams): number {
-  const fullSpin = revsToRadPerSec(params.spinAnswerFullRevs);
-  const s = fullSpin > 0 && Number.isFinite(incomingTopspin) ? Math.min(1, Math.max(-1, incomingTopspin / fullSpin)) : 0;
-  if (s < 0) {
-    const shortened = depth - params.spinAnswerM * Math.max(0, -s - lift);
-    return Math.max(shortened, Math.min(depth, RETURN_MIN_DEPTH_M));
-  }
+  const s = incomingSpinShare(incomingTopspin, params);
+  if (s < 0) return shorten(depth, params.spinAnswerM * Math.max(0, -s - lift));
   if (s > 0) return depth + params.spinAnswerM * Math.max(0, lift - (1 - s));
   return depth;
+}
+
+/**
+ * Answer an incoming Shot's spin with the Face Angle (spec P3-f, ADR 0003): the player matches
+ * it, closing against Topspin and opening against Backspin. With `f` the Face Angle share and
+ * `s` as in `answerSpin`: against Backspin, depth shrinks by `spinAnswerM × max(0, f − s)`, with
+ * the same RETURN_MIN_DEPTH_M floor; against Topspin it grows by `spinAnswerM × max(0, s − f)`.
+ * So a flat face is punished by both, unlike the Camera's flat Swing. Only the target moves
+ * (ADR 0001).
+ */
+function answerSpinWithFaceAngle(depth: number, incomingTopspin: number, f: number, params: ResolverParams): number {
+  const s = incomingSpinShare(incomingTopspin, params);
+  if (s < 0) return shorten(depth, params.spinAnswerM * Math.max(0, f - s));
+  if (s > 0) return depth + params.spinAnswerM * Math.max(0, s - f);
+  return depth;
+}
+
+/** The incoming Shot's Topspin as a share of `spinAnswerFullRevs`, in [−1, 1] (negative = Backspin); 0 with no full spin to measure it against. */
+function incomingSpinShare(incomingTopspin: number, params: ResolverParams): number {
+  const fullSpin = revsToRadPerSec(params.spinAnswerFullRevs);
+  return fullSpin > 0 && Number.isFinite(incomingTopspin) ? Math.min(1, Math.max(-1, incomingTopspin / fullSpin)) : 0;
+}
+
+/** `depth` less `by`, never closer than RETURN_MIN_DEPTH_M, but never pushing out a depth that was already closer. */
+function shorten(depth: number, by: number): number {
+  return Math.max(depth - by, Math.min(depth, RETURN_MIN_DEPTH_M));
 }
 
 function clamp01(value: number): number {
@@ -338,7 +396,7 @@ export function feedResult(event: ShotEvent): 'returned' | 'failed' | null {
 export interface IncomingTiming {
   /** Its Ideal Time on the performance.now() clock; null if it never reaches the player. */
   readonly idealAtMs: number | null;
-  /** Its Topspin, rad/s (negative = Backspin): the Swing's Lift must answer it. */
+  /** Its Topspin, rad/s (negative = Backspin): the Swing's Lift, or its Face Angle, must answer it. */
   readonly topspin: number;
 }
 
@@ -383,6 +441,8 @@ export interface ShotResolverOptions {
   solve?: ShotSolver;
   /** The Serve solver; `solveServe` unless a test stands one in. */
   solveServe?: typeof solveServe;
+  /** The Face Angle parameters for Swings carrying a `faceAngle`, read at each such accepted Swing; the live knobs unless a test stands them in. */
+  faceAngleParams?: () => FaceAngleParams;
 }
 
 type FeedState =
@@ -406,6 +466,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
   const random = options.random;
   const solve = options.solve ?? solveShot;
   const serveSolver = options.solveServe ?? solveServe;
+  const faceAngleParams = options.faceAngleParams ?? knobFaceAngleParams;
   let state: FeedState = { phase: 'none' };
 
   /** Launch the accepted Swing's Return, or its Serve, from where the ball is struck. */
@@ -443,9 +504,15 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
         state = { phase: 'done' };
         return [{ type: 'late', delta }];
       }
-      const input = { delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand() };
+      const input: ServeInput = { delta, peakSpeed: swing.peakSpeed, vertPath: swing.vertPath, side: swing.side, hand: options.hand() };
+      // A Face Angle (the Phone) sets and answers Spin instead of Lift (ADR 0003).
+      let face: FaceAngleParams | undefined;
+      if (swing.faceAngle !== undefined) {
+        input.faceAngle = swing.faceAngle;
+        face = faceAngleParams();
+      }
       const { serveFrom } = state;
-      const plan = serveFrom ? planServe(input, serveFrom, params, random) : planReturn({ ...input, incomingTopspin: state.topspin }, params, random);
+      const plan = serveFrom ? planServe(input, serveFrom, params, random, face) : planReturn({ ...input, incomingTopspin: state.topspin }, params, random, face);
       const accepted = { type: 'accepted', swing, delta, contactAtMs: Math.max(nowMs, state.idealAtMs), plan } as const;
       state = { phase: 'accepted', accepted, serveFrom };
       return [accepted];
@@ -486,7 +553,7 @@ export function createShotResolver(options: ShotResolverOptions): ShotResolver {
  * failed (ADR 0001): a planned miss, long or wide, stays a miss. If the
  * intent can't be solved, it is tried again with no spin (when it had any),
  * then solved best-effort with no spin, and that launch is used. A Return
- * with Topspin takes this path whenever its spun Shot has no solution.
+ * with Topspin or Backspin takes this path whenever its spun Shot has no solution.
  */
 export function solveReturn(solve: ShotSolver, from: Vec3, intent: ShotIntent): ShotSolution {
   const solved = solve(from, intent);

@@ -17,8 +17,10 @@ import {
 import { makeRng } from '../util/rng.ts';
 import { findIdealTime } from './rally.ts';
 import { findTossIdealTime, judgeServe, launchToss, solveServe, type ServeIntent } from './serve.ts';
+import { faceAngleForShare, type FaceAngleParams } from './faceAngle.ts';
 import {
   createShotResolver,
+  faceAngleSpin,
   feedResult,
   judgeSwingTiming,
   knobResolverParams,
@@ -29,6 +31,7 @@ import {
   solvePlannedServe,
   solveReturn,
   type ResolverParams,
+  type ReturnInput,
   type ServeInput,
   type ShotEvent,
 } from './shotResolver.ts';
@@ -835,5 +838,209 @@ describe('a missed toss', () => {
     const missed = playToss();
     expect(missed.events).toEqual([{ type: 'miss' }]);
     expect(missed.ball.position.y).toBeLessThan(TABLE_TOP_Y); // the toss just drops
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Face Angle (spec P3-f, ADR 0003): a Swing with a `faceAngle` (the Phone)
+// sets and answers Spin by it instead of Lift
+// ---------------------------------------------------------------------------
+
+/** Spec P3-f starting values (RETURN_BACKSPIN_MAX_REVS a guess). */
+const FACE: FaceAngleParams = { deadDeg: 10, fullDeg: 45, backspinMaxRevs: 30, speedFull: 7.5 };
+const rad = (deg: number) => (deg * Math.PI) / 180;
+const revs = revsToRadPerSec;
+
+describe('Spin set by the Face Angle', () => {
+  /** A Swing at PHONE_SPEED_FULL, on time, against a no-Spin Shot. */
+  const phone = { delta: 0, peakSpeed: 7.5, vertPath: 0.5, side: 'forehand', hand: 'right', incomingTopspin: 0 } as const;
+  const planAt = (faceDeg: number, input: Partial<ReturnInput> = {}, random = noScatter) =>
+    planReturn({ ...phone, ...input, faceAngle: rad(faceDeg) }, SPEC, random, FACE);
+
+  it('gives a closed face Topspin, up to RETURN_TOPSPIN_MAX_REVS at 45°', () => {
+    expect(planAt(45).topspin).toBeCloseTo(revs(SPEC.returnTopspinMaxRevs));
+    expect(planAt(27.5).topspin).toBeCloseTo(revs(SPEC.returnTopspinMaxRevs) / 2);
+    expect(planAt(70).topspin).toBeCloseTo(revs(SPEC.returnTopspinMaxRevs));
+  });
+
+  it('gives an open face Backspin, up to RETURN_BACKSPIN_MAX_REVS at 45°', () => {
+    expect(planAt(-45).topspin).toBeCloseTo(-revs(FACE.backspinMaxRevs));
+    expect(planAt(-27.5).topspin).toBeCloseTo(-revs(FACE.backspinMaxRevs) / 2);
+    expect(planAt(-70).topspin).toBeCloseTo(-revs(FACE.backspinMaxRevs));
+  });
+
+  it('gives no Spin within ±10° of Zero', () => {
+    for (const deg of [0, 6, -6, 10, -10]) expect(planAt(deg).topspin).toBe(0);
+  });
+
+  it('scales the Spin by min(1, peakSpeed / PHONE_SPEED_FULL)', () => {
+    expect(planAt(45, { peakSpeed: 3.75 }).topspin).toBeCloseTo(revs(SPEC.returnTopspinMaxRevs) / 2);
+    expect(planAt(-45, { peakSpeed: 3.75 }).topspin).toBeCloseTo(-revs(FACE.backspinMaxRevs) / 2);
+    expect(planAt(45, { peakSpeed: 15 }).topspin).toBeCloseTo(revs(SPEC.returnTopspinMaxRevs));
+    expect(planAt(-45, { peakSpeed: 0 }).topspin).toBe(0);
+    expect(faceAngleSpin(rad(45), 6, SPEC, FACE)).toBeCloseTo(0.8 * revs(SPEC.returnTopspinMaxRevs));
+  });
+
+  it('ignores Lift: any vertPath gives the same plan, with Lift 0', () => {
+    for (const deg of [-45, 0, 30]) {
+      const flat = planAt(deg, { vertPath: 0.5 });
+      expect(planAt(deg, { vertPath: 4 })).toEqual(flat);
+      expect(planAt(deg, { vertPath: -2 })).toEqual(flat);
+      expect(flat.lift).toBe(0);
+    }
+  });
+
+  it('keeps the timing, speed and scatter rules: against a no-Spin Shot, only the Spin differs from a Camera Swing', () => {
+    const random = () => sequence(0.1, 0.8);
+    const camera = planReturn({ ...phone, delta: 120 }, SPEC, random());
+    for (const deg of [-45, 0, 45]) {
+      const plan = planAt(deg, { delta: 120 }, random());
+      expect(plan.target).toEqual(camera.target);
+      expect(plan.flightTime).toBe(camera.flightTime);
+      expect(plan.quality).toBe(camera.quality);
+    }
+  });
+
+  it('never gives Sidespin: the Return is launched with spin about the horizontal axis only, and lands', () => {
+    const { idealAtMs } = makeFeed();
+    for (const faceAngle of [rad(45), rad(-45)]) {
+      const intents: ShotIntent[] = [];
+      const solve = ((from: Vec3, intent: ShotIntent, opts?: Partial<SolveOptions>) => {
+        intents.push(intent);
+        return solveShot(from, intent, opts);
+      }) as ShotSolver;
+      const played = playFeed({ swingsAtMs: [idealAtMs - 50], swing: { peakSpeed: 7.5, faceAngle }, solve });
+      expect(types(played)).toEqual(['accepted', 'contact', 'return']);
+      const contact = played.events[1] as Extract<ShotEvent, { type: 'contact' }>;
+      expect(Math.sign(contact.plan.topspin)).toBe(Math.sign(faceAngle));
+      expect(intents.every((i) => i.sidespin === 0)).toBe(true);
+      expect(contact.ball.spin.y).toBe(0);
+    }
+  });
+
+  it('is used whenever the Swing has a faceAngle, even 0; a Swing without one never reads the Face Angle parameters', () => {
+    const { idealAtMs } = makeFeed();
+    const resolverWith = (faceAngleParams: () => FaceAngleParams) =>
+      createShotResolver({ params: () => SPEC, hand: () => 'right', random: noScatter, faceAngleParams });
+    const camera = resolverWith(() => {
+      throw new Error('a Camera Swing read the Face Angle parameters');
+    });
+    camera.startIncoming({ idealAtMs, topspin: 0 });
+    const [accepted] = camera.swing({ t: idealAtMs, peakSpeed: 5.5, side: 'forehand', vertPath: 4 }, idealAtMs);
+    expect(accepted).toMatchObject({ type: 'accepted', plan: { lift: 1, topspin: revs(SPEC.returnTopspinMaxRevs) } });
+    const phoneResolver = resolverWith(() => FACE);
+    phoneResolver.startIncoming({ idealAtMs, topspin: 0 });
+    const [phoneAccepted] = phoneResolver.swing({ t: idealAtMs, peakSpeed: 5.5, side: 'forehand', vertPath: 4, faceAngle: 0 }, idealAtMs);
+    expect(phoneAccepted).toMatchObject({ type: 'accepted', plan: { lift: 0, topspin: 0 } });
+  });
+});
+
+describe("Spin set by the Face Angle on the player's Serve", () => {
+  const onTime: ServeInput = { delta: 0, peakSpeed: 7.5, vertPath: 0.5, side: 'forehand', hand: 'right' };
+
+  it('follows the same rules as a Return: closed Topspin, open Backspin, scaled by speed, Lift ignored', () => {
+    const { strike } = tossFor();
+    const serveAt = (faceDeg: number, input: Partial<ServeInput> = {}) => planServe({ ...onTime, ...input, faceAngle: rad(faceDeg) }, strike, SPEC, noScatter, FACE);
+    expect(serveAt(45).topspin).toBeCloseTo(revs(SPEC.returnTopspinMaxRevs));
+    expect(serveAt(-45).topspin).toBeCloseTo(-revs(FACE.backspinMaxRevs));
+    expect(serveAt(5).topspin).toBe(0);
+    expect(serveAt(-45, { peakSpeed: 3.75 }).topspin).toBeCloseTo(-revs(FACE.backspinMaxRevs) / 2);
+    expect(serveAt(30, { vertPath: 4 })).toEqual(serveAt(30));
+    expect(serveAt(30).lift).toBe(0);
+    for (const deg of [-45, 0, 45]) {
+      const ret = planReturn({ ...onTime, incomingTopspin: 0, faceAngle: rad(deg) }, SPEC, noScatter, FACE);
+      expect(serveAt(deg)).toMatchObject({ target: ret.target, topspin: ret.topspin, lift: 0 });
+    }
+  });
+
+  it('serves legally with a closed or an open face, with the Spin on the ball and no Sidespin', () => {
+    const { idealAtMs } = tossFor();
+    for (const faceAngle of [rad(45), rad(-45)]) {
+      const played = playToss({ swingsAtMs: [idealAtMs - 50], swing: { faceAngle } });
+      expect(played.events.map((e) => e.type)).toEqual(['accepted', 'contact']);
+      const contact = played.events[1] as Extract<ShotEvent, { type: 'contact' }>;
+      expect(Math.sign(contact.plan.topspin)).toBe(Math.sign(faceAngle));
+      expect(contact.ball.spin.y).toBe(0);
+      expect(judgeServe(contact.ball, 'player')).toBe('legal');
+    }
+  });
+});
+
+describe('Answering Spin with the Face Angle', () => {
+  const FULL = revs(40); // SPIN_ANSWER_FULL_REVS
+  const SHIFT = 0.3; // SPIN_ANSWER_M
+  const BASE = 0.9; // a Swing of power 0.5 (peak 5.5), before Spin and scatter
+  const atAngle = (incomingTopspin: number, faceAngle: number, params: Partial<ResolverParams> = {}) =>
+    planReturn({ delta: 0, peakSpeed: 5.5, vertPath: 0.5, side: 'forehand', hand: 'right', incomingTopspin, faceAngle }, { ...SPEC, ...params }, noScatter, FACE);
+  /** A Swing whose Face Angle share is `f` (`faceAngleForShare`), against `incomingTopspin`. */
+  const planFor = (incomingTopspin: number, f: number, params: Partial<ResolverParams> = {}) => atAngle(incomingTopspin, faceAngleForShare(f, FACE), params);
+  const depthOf = (plan: { target: { z: number } }) => -plan.target.z;
+
+  it('moves nothing when the Face Angle matches the Spin (open against Backspin, closed against Topspin)', () => {
+    for (const s of [-1, -0.5, -0.2, 0.2, 0.5, 1]) expect(depthOf(planFor(s * FULL, s))).toBeCloseTo(BASE);
+  });
+
+  it('moves nothing when the face is more open than Backspin needs, or more closed than Topspin needs', () => {
+    expect(depthOf(planFor(-0.5 * FULL, -1))).toBeCloseTo(BASE);
+    expect(depthOf(planFor(0.5 * FULL, 1))).toBeCloseTo(BASE);
+  });
+
+  it('sends a flat face short against Backspin and long against Topspin', () => {
+    expect(depthOf(planFor(-FULL, 0))).toBeCloseTo(BASE - SHIFT);
+    expect(depthOf(planFor(-0.5 * FULL, 0))).toBeCloseTo(BASE - 0.15);
+    expect(depthOf(planFor(FULL, 0))).toBeCloseTo(BASE + SHIFT);
+    expect(depthOf(planFor(0.5 * FULL, 0))).toBeCloseTo(BASE + 0.15);
+  });
+
+  it('treats a face within the dead zone as flat', () => {
+    expect(depthOf(atAngle(-FULL, rad(8)))).toBeCloseTo(BASE - SHIFT);
+    expect(depthOf(atAngle(FULL, rad(-8)))).toBeCloseTo(BASE + SHIFT);
+  });
+
+  it('follows the formula: shorter by SPIN_ANSWER_M × max(0, f − s) against Backspin, longer by SPIN_ANSWER_M × max(0, s − f) against Topspin', () => {
+    // s = −0.5, f = 0.5 (closed against Backspin): 0.3 × 1.
+    expect(depthOf(planFor(-0.5 * FULL, 0.5))).toBeCloseTo(BASE - 0.3);
+    // s = −1, f = 1: 0.3 × 2, from a deeper Return so the floor stays out of the way.
+    expect(depthOf(planFor(-FULL, 1, { depthSoftM: 1.2, depthHardM: 1.2 }))).toBeCloseTo(1.2 - 0.6);
+    // s = 1, f = −1 (open against Topspin): 0.3 × 2.
+    expect(depthOf(planFor(FULL, -1))).toBeCloseTo(BASE + 0.6);
+    // s = 0.8, f = 0.3: 0.3 × 0.5.
+    expect(depthOf(planFor(0.8 * FULL, 0.3))).toBeCloseTo(BASE + 0.15);
+  });
+
+  it('moves nothing against a no-Spin Shot, whatever the Face Angle', () => {
+    for (const f of [-1, -0.4, 0, 0.4, 1]) expect(depthOf(planFor(0, f))).toBeCloseTo(BASE);
+  });
+
+  it('never lets Backspin shorten a Return past RETURN_MIN_DEPTH_M, nor pushes out one already closer', () => {
+    const shallow = { depthSoftM: 0.3, depthHardM: 0.3 };
+    expect(depthOf(planFor(-FULL, 0, shallow))).toBeCloseTo(0.2);
+    expect(depthOf(planFor(-FULL, 1, { ...shallow, spinAnswerM: 1 }))).toBeCloseTo(0.2);
+    expect(depthOf(planFor(-FULL, 1, { depthSoftM: 0.1, depthHardM: 0.1 }))).toBeCloseTo(0.1);
+  });
+
+  it("only moves the target's depth, never the pace, direction or the Return's own Spin", () => {
+    for (const f of [-1, 0, 1]) {
+      const spun = planFor(-FULL, f);
+      const plain = planFor(0, f);
+      expect(spun.flightTime).toBe(plain.flightTime);
+      expect(spun.topspin).toBe(plain.topspin);
+      expect(spun.target.x).toBe(plain.target.x);
+    }
+  });
+
+  it("punishes a flat face against Topspin, where the Camera's flat Swing (Lift 0) is never sent long", () => {
+    const camera = planReturn({ delta: 0, peakSpeed: 5.5, vertPath: 0.5, side: 'forehand', hand: 'right', incomingTopspin: FULL }, SPEC, noScatter);
+    expect(depthOf(camera)).toBeCloseTo(BASE);
+    expect(depthOf(planFor(FULL, 0))).toBeCloseTo(BASE + SHIFT);
+  });
+
+  it('in play, a flat face against a Backspin Feed lands shorter than a matching open face', () => {
+    const { idealAtMs } = makeFeed();
+    const contactDepth = (faceAngle: number) => {
+      const played = playFeed({ swingsAtMs: [idealAtMs - 100], swing: { peakSpeed: 5.5, faceAngle }, incomingTopspin: -FULL });
+      return depthOf((played.events.find((e) => e.type === 'contact') as Extract<ShotEvent, { type: 'contact' }>).plan);
+    };
+    expect(contactDepth(rad(-45))).toBeCloseTo(contactDepth(0) + SHIFT);
   });
 });

@@ -288,6 +288,21 @@ export const SPIN_ANSWER_FULL_REVS = 40;
 /** Backspin never moves a Return's landing spot closer than this to the net, metres (fixed). */
 export const RETURN_MIN_DEPTH_M = 0.2;
 
+/**
+ * Backspin of a Return or Serve struck with a fully open Face Angle at full speed, revolutions/s
+ * (spec P3-f; Phone only, ADR 0003). Starting guess, a little under RETURN_TOPSPIN_MAX_REVS.
+ */
+export const RETURN_BACKSPIN_MAX_REVS = knobs.number({ name: 'RETURN_BACKSPIN_MAX_REVS', min: 0, max: 80, step: 1, default: 30, group: 'Return' });
+/** Face Angle (degrees from Zero, either way) within which a Swing sets no Spin and answers none (spec P3-f). */
+export const FACE_ANGLE_DEAD_DEG = knobs.number({ name: 'FACE_ANGLE_DEAD_DEG', min: 0, max: 30, step: 1, default: 10, group: 'Phone' });
+/** Face Angle (degrees from Zero, either way) that gives full Topspin (closed) or Backspin (open) (spec P3-f). */
+export const FACE_ANGLE_FULL_DEG = knobs.number({ name: 'FACE_ANGLE_FULL_DEG', min: 15, max: 90, step: 1, default: 45, group: 'Phone' });
+/**
+ * Phone Swing speed (peakSpeed) at which a Face Angle sets its full Spin; slower Swings set
+ * proportionally less (spec P3-f). 7.5 is 900 deg/s at P3-c's `dpsPerUnit` of 120.
+ */
+export const PHONE_SPEED_FULL = knobs.number({ name: 'PHONE_SPEED_FULL', min: 1, max: 20, step: 0.5, default: 7.5, group: 'Phone' });
+
 /** Developer mouse mode: shoulder width as a share of the canvas width (SPEC: the screen width). */
 export const MOUSE_SHOULDER_WIDTH = knobs.number({ name: 'MOUSE_SHOULDER_WIDTH', min: 0.1, max: 2, step: 0.05, default: 1, group: 'Swing' });
 
