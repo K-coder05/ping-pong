@@ -50,6 +50,8 @@ root.innerHTML = `
   <div class="rate" data-testid="rate" hidden></div>
   <div class="hint" data-testid="hint"></div>
   <p class="grip">Grip your Phone firmly, like the handle of a bat. Use a wrist strap if you have one.</p>
+  <p class="grip" data-testid="zero-how" hidden>Hold the phone like the handle of a bat, screen facing your palm side,
+    point it at the screen and tap Zero</p>
   <button type="button" class="zero" data-testid="zero" hidden>Zero</button>
   <div class="received" data-testid="received"></div>`;
 document.body.append(root);
@@ -64,6 +66,7 @@ const deniedEl = root.querySelector<HTMLElement>('[data-testid="denied"]')!;
 const rateEl = root.querySelector<HTMLElement>('[data-testid="rate"]')!;
 const hintEl = root.querySelector<HTMLElement>('[data-testid="hint"]')!;
 const zeroBtn = root.querySelector<HTMLButtonElement>('[data-testid="zero"]')!;
+const zeroHowEl = root.querySelector<HTMLElement>('[data-testid="zero-how"]')!;
 const receivedEl = root.querySelector<HTMLElement>('[data-testid="received"]')!;
 
 const now = () => performance.now();
@@ -87,7 +90,8 @@ function join(code: string) {
   const show = () => {
     statusEl.textContent = statusLabel(l.status());
     statusEl.dataset.state = l.status();
-    zeroBtn.hidden = l.status() !== 'connected';
+    // Zeroing stays available whenever connected; the laptop decides when to apply it.
+    zeroBtn.hidden = zeroHowEl.hidden = l.status() !== 'connected';
   };
   show();
   l.onStatus(show);

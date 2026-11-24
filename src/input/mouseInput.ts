@@ -20,9 +20,14 @@ import type { SwingEvent, SwingSource } from './types.ts';
  * Developer only: it has no menu entry and is never offered to players.
  */
 
-/** Which input drives Swings: the mouse only with `?input=mouse` in the URL. */
-export function swingInputMode(search: string): 'mouse' | 'pose' {
-  return new URLSearchParams(search).get('input') === 'mouse' ? 'mouse' : 'pose';
+/**
+ * Which input drives Swings: the mouse with `?input=mouse`, the Phone with
+ * `?input=phone` (a developer flag until P3-e's Input picker), otherwise the
+ * Camera's pose.
+ */
+export function swingInputMode(search: string): 'mouse' | 'phone' | 'pose' {
+  const input = new URLSearchParams(search).get('input');
+  return input === 'mouse' || input === 'phone' ? input : 'pose';
 }
 
 /** One pointer sample, in canvas CSS pixels (y down), with the canvas size. */

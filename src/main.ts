@@ -28,6 +28,12 @@
  * there is no camera to start and no pose latency to calibrate. The mouse
  * also neither reads nor saves the player's Timing Offset (it would shift the
  * mouse's near-zero-latency Swings); TIMING_OFFSET_MS starts at 0 there.
+ *
+ * `?input=phone` (a developer flag until P3-e's Input picker) does the same
+ * with the Phone: it shows the pairing QR code and room code until a Phone
+ * connects, then takes Swings and the Paddle from the Phone Input; play waits
+ * until the Phone is Zeroed and sending. In debug mode the Phone log is
+ * recorded for fixtures (debug panel, Phone group).
  */
 import { createSounds, unlockAudioOnGesture } from './audio/sounds.ts';
 import { simulate } from './game/ball.ts';
@@ -59,11 +65,12 @@ import { timingOffsetStore } from './game/timingOffsetStore.ts';
 import type { HandPositionSource } from './input/handPosition.ts';
 import { installPoseInput, startCamera } from './input/installPoseInput.ts';
 import { installMouseInput, swingInputMode, type MouseInput } from './input/mouseInput.ts';
+import { createPhoneInput, naiveOffset, type PhoneInput } from './input/phoneInput.ts';
 import { knobSwingParams } from './input/poseInput.ts';
 import type { SwingSource } from './input/types.ts';
 import { createBallStatusReadout } from './render/ballStatusReadout.ts';
 import { installCameraOverlay } from './render/cameraOverlay.ts';
-import { createDebugMode } from './render/debugMode.ts';
+import { createDebugMode, installPhoneLogDownload } from './render/debugMode.ts';
 import { askHandedness } from './render/handednessPrompt.ts';
 import { createHud } from './render/hud.ts';
 import { matchHud, type HudEvent } from './render/hudModel.ts';
@@ -83,6 +90,9 @@ import {
 } from './render/screens.ts';
 import { createTableScene } from './render/scene.ts';
 import { sharedSensing } from './sensing/shared.ts';
+import { openLaptopLink } from './phone/link.ts';
+import { mountPairing } from './phone/pairing.ts';
+import { signalUrl } from './phone/signalUrl.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
 if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
@@ -94,11 +104,15 @@ const hud = createHud();
 
 /** Developer mouse mode (`?input=mouse`), never offered to players. */
 const mouseMode = swingInputMode(window.location.search) === 'mouse';
+/** The Phone (`?input=phone`), a developer flag until the Input picker. */
+const phoneMode = swingInputMode(window.location.search) === 'phone';
+/** Whether the Camera's pose drives play (no developer input flag). */
+const poseMode = !mouseMode && !phoneMode;
 
 // Pose Swings, wrist and tracking, once the camera is on and the hand is
 // known. In play, the hand comes from onboarding's handedness step (asked
 // after the framing instruction), not from a prompt when the camera starts.
-const pose = installPoseInput(knobs, mouseMode ? {} : { hand: () => handedness.chosen() });
+const pose = installPoseInput(knobs, poseMode ? { hand: () => handedness.chosen() } : {});
 
 /** The hitting hand: as saved, or right until the player is asked. */
 const hittingHand = () => handedness.hand ?? 'right';
@@ -116,11 +130,34 @@ const mouse: MouseInput | null =
       })
     : null;
 
-/** The one SwingSource the game listens to: the mouse if on, otherwise pose. */
-const swings: SwingSource = mouse ?? pose;
+/** The Phone, with `?input=phone` only: paired by QR code, shown until it connects. */
+const phone: PhoneInput | null = phoneMode ? installPhone() : null;
 
-/** Where the hitting wrist is, for the Paddle to follow: the mouse if on, otherwise the tracked wrist. */
-const handPositions: HandPositionSource = mouse ?? pose;
+function installPhone(): PhoneInput {
+  const now = () => performance.now();
+  const link = openLaptopLink({ signalUrl: signalUrl(), now });
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(12,14,20,0.92);color:#e6e9ef;font-family:system-ui,sans-serif';
+  document.body.append(overlay);
+  mountPairing(overlay, link);
+  const hint = document.createElement('p');
+  hint.textContent = 'Scan the code with your Phone and tap “Tap to start” on it. Then hold it like the handle of a bat and tap Zero.';
+  overlay.append(hint);
+  const show = () => {
+    const connected = link.status() === 'connected' || link.status() === 'relay';
+    overlay.style.display = connected ? 'none' : 'flex';
+  };
+  show();
+  link.onStatus(show);
+  installPhoneLogDownload({ registry: knobs, link, recording: () => debug.active });
+  return createPhoneInput(link, now, naiveOffset(), hittingHand);
+}
+
+/** The one SwingSource the game listens to: the mouse or Phone if on, otherwise pose. */
+const swings: SwingSource = mouse ?? phone ?? pose;
+
+/** Where the hitting wrist is, for the Paddle to follow: the mouse or Phone if on, otherwise the tracked wrist. */
+const handPositions: HandPositionSource = mouse ?? phone ?? pose;
 
 /**
  * The saved Timing Offset becomes the TIMING_OFFSET_MS knob's starting value
@@ -131,7 +168,7 @@ const handPositions: HandPositionSource = mouse ?? pose;
  * replace it.
  */
 function applySavedTimingOffset(): void {
-  if (!mouse && timingOffsetStore.offsetMs !== null) TIMING_OFFSET_MS.set(timingOffsetStore.offsetMs);
+  if (poseMode && timingOffsetStore.offsetMs !== null) TIMING_OFFSET_MS.set(timingOffsetStore.offsetMs);
 }
 applySavedTimingOffset();
 knobs.button({
@@ -158,11 +195,11 @@ let playing = false;
 async function calibrate(cancellable: boolean): Promise<boolean> {
   calibrating = true;
   try {
-    const video = mouse ? null : (await sharedSensing()).video;
+    const video = poseMode ? (await sharedSensing()).video : null;
     const offsetMs = await onboardingScreens.calibrate({ video, swings, cancellable });
     if (offsetMs === null) return false;
     TIMING_OFFSET_MS.set(offsetMs); // snapped to the knob's 5 ms grid and clamped to its range
-    if (!mouse) timingOffsetStore.save(TIMING_OFFSET_MS.value);
+    if (poseMode) timingOffsetStore.save(TIMING_OFFSET_MS.value);
     console.info(`Timing Offset: measured ${offsetMs} ms, using ${TIMING_OFFSET_MS.value} ms`);
     return true;
   } finally {
@@ -170,14 +207,14 @@ async function calibrate(cancellable: boolean): Promise<boolean> {
   }
 }
 
-/** Whether the game must wait for the player's hand: never with the mouse. */
-const waitingForHand = (): boolean => !mouse && pose.tracking !== 'tracked';
+/** Whether the game must wait for the player's hand: never with the mouse; with the Phone, until it is Zeroed and sending. */
+const waitingForHand = (): boolean => (phone ? phone.latest === null : poseMode && pose.tracking !== 'tracked');
 /**
  * Whether to show "Can't see your hand": once pose is running, until the wrist
  * is first seen and whenever it is lost, during play and calibration (whose
  * Swings also need the wrist tracked).
  */
-const handLost = (): boolean => !mouse && pose.tracking === 'lost';
+const handLost = (): boolean => poseMode && pose.tracking === 'lost';
 
 /**
  * Whether the core is paused: no new Feed or Serve and no Swings outside play
@@ -383,7 +420,8 @@ let playRequest = 0;
 async function play(choice: StartChoice): Promise<void> {
   const request = ++playRequest;
   playing = false;
-  const steps = choice.mode === 'match' ? matchStartSteps({ input: mouseMode ? 'mouse' : 'pose', timingOffsetSaved: timingOffsetStore.offsetMs !== null }) : [];
+  // The Phone, like the mouse, has no camera to start and keeps no Timing Offset yet (P3-e adds one per Input).
+  const steps = choice.mode === 'match' ? matchStartSteps({ input: poseMode ? 'pose' : 'mouse', timingOffsetSaved: timingOffsetStore.offsetMs !== null }) : [];
   if (steps.includes('calibration') && !(await calibrate(true))) {
     if (request === playRequest) dispatch({ type: 'back-to-start' });
     return;
@@ -406,7 +444,7 @@ window.addEventListener('keydown', (event) => {
  * player is told why and can try again.
  */
 const onboardingPlan = onboardingSteps({
-  input: mouseMode ? 'mouse' : 'pose',
+  input: poseMode ? 'pose' : 'mouse',
   handSaved: handedness.hand !== null,
   timingOffsetSaved: timingOffsetStore.offsetMs !== null,
 });

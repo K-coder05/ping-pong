@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { TABLE_TOP_Y } from '../game/constants.ts';
-import { PADDLE_BLADE_THICKNESS, contactAssistWeight, createPaddle, extrapolateHand, type PaddleParams, swingFrameAt, wristToPaddle, type SwingAnimation } from './paddle.ts';
+import { PADDLE_BLADE_THICKNESS, contactAssistWeight, createPaddle, extrapolateHand, type PaddleParams, swingFrameAt, tipByFaceAngle, wristToPaddle, type SwingAnimation } from './paddle.ts';
 
 const REST_PY = 0.75;
 
@@ -207,6 +207,25 @@ describe('the Paddle', () => {
     };
     expect(run(false)).toBeCloseTo(0.0763, 3); // 0.2 shoulder widths at 0.381 m each (half the 1.525 m table per 2)
     expect(run(true)).toBeCloseTo(0.4575, 3); // 0.2 + 10 sw/s × 100 ms = 1.2 shoulder widths
+  });
+
+  it("tips by the Phone's Face Angle: closed tilts the face forward, even drawn ahead by latency extrapolation", () => {
+    expect(paddle().update(1000, { t: 1000, ...WRIST, faceAngle: 0.4 }).pitch).toBeCloseTo(0.4);
+    expect(paddle().update(1000, { t: 1000, ...WRIST, faceAngle: -0.3 }).pitch).toBeCloseTo(-0.3);
+    const p = paddle({ latencyExtrapolation: true });
+    p.update(1000, { t: 1000, ...WRIST, faceAngle: 0.2 });
+    expect(p.update(1020, { t: 1020, u: 1.1, py: REST_PY, faceAngle: 0.2 }).pitch).toBeCloseTo(0.2);
+    expect(paddle().update(1000, { t: 1000, ...WRIST }).pitch).toBe(0);
+  });
+
+  it('adds the Face Angle to the Swing animation, the other way when the Backhand face is shown', () => {
+    const p = paddle({ contactAssist: false });
+    p.swing({ onsetMs: 1000, contactAtMs: 1150, side: 'backhand' });
+    const plain = swingFrameAt({ onsetMs: 1000, contactAtMs: 1150, side: 'backhand' }, 1100, 'right').pitch;
+    // The Phone's Forehand face closed by 0.3 is the Backhand face open by 0.3.
+    expect(p.update(1100, { t: 1100, ...WRIST, faceAngle: 0.3 }).pitch).toBeCloseTo(plain - 0.3);
+    expect(tipByFaceAngle(0.1, false, 0.3)).toBeCloseTo(0.4);
+    expect(tipByFaceAngle(0.1, true, 0.3)).toBeCloseTo(-0.2);
   });
 
   it('measures the velocity it extrapolates over a window, so one jittery sample is not magnified', () => {

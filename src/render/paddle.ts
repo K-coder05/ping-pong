@@ -2,8 +2,9 @@
  * The Paddle (SPEC "Scene, Paddle and sound"): where it is drawn and how it
  * moves, as pure functions the scene draws from. It follows the hitting
  * wrist, plays a Swing animation timed to the contact moment, and (contact
- * assist) eases toward the ball at contact. It is drawn for feel only: it
- * never decides whether a Return happens (ADR 0001).
+ * assist) eases toward the ball at contact. With the Phone it also tips by
+ * the Face Angle. It is drawn for feel only: it never decides whether a
+ * Return happens (ADR 0001).
  */
 
 import type { Vec3 } from '../game/ball.ts';
@@ -68,6 +69,15 @@ export function extrapolateHand(prev: HandPosition | null, latest: HandPosition,
   if (!prev || latest.t <= prev.t || nowMs - latest.t > STALE_SAMPLE_MS) return latest;
   const ahead = latencyMs / (latest.t - prev.t);
   return { t: latest.t, u: latest.u + (latest.u - prev.u) * ahead, py: latest.py + (latest.py - prev.py) * ahead };
+}
+
+/**
+ * The blade's pitch tipped by the Face Angle (radians, + = the Forehand face
+ * closed, as the Phone Input gives it). Pitch closes whichever face is shown,
+ * so the Backhand face, the other side of the blade, tips the other way.
+ */
+export function tipByFaceAngle(pitch: number, backhandFace: boolean, forehandFaceAngle: number): number {
+  return pitch + (backhandFace ? -forehandFaceAngle : forehandFaceAngle) + 0;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -249,7 +259,11 @@ export interface Paddle {
   swing(animation: SwingAnimation): void;
   /** Contact happened at `atMs` (the frame at or just after the planned one), striking the ball at `position`. */
   contact(atMs: number, position: Readonly<Vec3>): void;
-  /** Once per frame, with the latest wrist sample (or null while it is unknown): where to draw the Paddle. */
+  /**
+   * Once per frame, with the latest wrist sample (or null while it is
+   * unknown): where to draw the Paddle. A sample's `faceAngle` (the Phone's,
+   * for the Forehand face) tips the blade.
+   */
   update(nowMs: number, wrist: HandPosition | null): PaddlePose;
 }
 
@@ -296,12 +310,14 @@ export function createPaddle(options: PaddleOptions): Paddle {
       const params = options.params();
       const hand = options.hand();
       const followed = followWrist(nowMs, wrist, params);
+      const faceAngle = wrist?.faceAngle ?? 0;
       const onWrist = wristToPaddle(followed ?? { u: 0, py: PADDLE_REST_PY }, { hand, rangeSw: params.rangeSw, restPy: PADDLE_REST_PY });
 
       const frame = swing ? swingFrameAt(swing, nowMs, hand) : null;
       if (!swing || !frame || frame.phase === 'done') {
         swing = null;
-        return { position: onWrist, yaw: 0, pitch: 0, backhandFace: (followed?.u ?? 0) < 0 };
+        const backhandFace = (followed?.u ?? 0) < 0;
+        return { position: onWrist, yaw: 0, pitch: tipByFaceAngle(0, backhandFace, faceAngle), backhandFace };
       }
 
       let base = onWrist;
@@ -315,7 +331,7 @@ export function createPaddle(options: PaddleOptions): Paddle {
       return {
         position: { x: base.x + frame.offset.x, y: base.y + frame.offset.y, z: base.z + frame.offset.z },
         yaw: frame.yaw,
-        pitch: frame.pitch,
+        pitch: tipByFaceAngle(frame.pitch, frame.backhandFace, faceAngle),
         backhandFace: frame.backhandFace,
       };
     },

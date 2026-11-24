@@ -72,12 +72,14 @@ describe('mouse Swings (screen width = shoulder width, canvas centre = midline)'
 });
 
 describe('swingInputMode', () => {
-  it('uses the mouse only with ?input=mouse, otherwise pose', () => {
+  it('uses the mouse with ?input=mouse, the Phone with ?input=phone, otherwise pose', () => {
     expect(swingInputMode('?input=mouse')).toBe('mouse');
     expect(swingInputMode('?overlay&input=mouse')).toBe('mouse');
     expect(swingInputMode('')).toBe('pose');
     expect(swingInputMode('?input=pose')).toBe('pose');
     expect(swingInputMode('?mouse')).toBe('pose');
+    expect(swingInputMode('?input=phone')).toBe('phone');
+    expect(swingInputMode('?mode=match&input=phone')).toBe('phone');
   });
 });
 
