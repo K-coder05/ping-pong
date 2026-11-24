@@ -72,7 +72,9 @@ const DRIFT_BLEND = 0.04;
 /**
  * A round that disagrees with the estimate by more than this (or by more than
  * its own round trip, whichever is larger) is not drift: the Phone's clock
- * restarted, e.g. the page reloaded. Take it at once instead of blending.
+ * restarted, e.g. the page reloaded. Take it at once instead of blending. A
+ * single answer that disagrees by as much starts the estimate over from that
+ * answer straight away, without waiting for its round to finish.
  */
 const SNAP_MIN_MS = 20;
 
@@ -169,7 +171,15 @@ export class ClockSync implements ClockOffset {
     const t3 = this.now();
     this.pendingT0 = null;
     this.clearTimer();
-    this.round.push(clockSample(m.t0, m.t1, m.t2, t3));
+    const sample = clockSample(m.t0, m.t1, m.t2, t3);
+    if (this.rounds > 0 && Math.abs(sample.theta - this.offsetAt(t3)) > Math.max(SNAP_MIN_MS, sample.delta)) {
+      // The Phone's clock restarted (its page reloaded): don't wait for the round to finish, or Swings in the
+      // meantime are stamped on the old clock. Start over from this answer, as on first connecting.
+      this.rounds = 0;
+      this.drift = 0;
+      this.round = [];
+    }
+    this.round.push(sample);
     if (this.rounds === 0) {
       const best = this.round.reduce((a, b) => (b.delta < a.delta ? b : a));
       this.theta = best.theta;

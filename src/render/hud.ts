@@ -5,6 +5,7 @@
  * banner. In a Match, the score, the server and the standing ("Game point",
  * "Deuce") replace the Streak. Sized to be read from 1.5–2 m away.
  */
+import { HAND_LOST_TEXT } from '../game/handPause.ts';
 import type { MatchHudModel } from './hudModel.ts';
 
 export interface Hud {
@@ -16,8 +17,12 @@ export interface Hud {
   showMatch(model: MatchHudModel | null): void;
   /** Flash a short message (e.g. "Early!") for a moment. */
   showFeedback(text: string): void;
-  /** Show or hide the "Can't see your hand" banner (SPEC "Tracking loss"). Cheap to call every frame. */
-  showHandLost(lost: boolean): void;
+  /**
+   * Show or hide the "Can't see your hand" banner (SPEC "Tracking loss"), or
+   * with the Phone "Phone disconnected: unlock your phone" (`text`; see
+   * `game/handPause.ts`). Cheap to call every frame.
+   */
+  showHandLost(lost: boolean, text?: string): void;
 }
 
 /** How long a feedback message stays up, ms. */
@@ -111,7 +116,7 @@ export function createHud(): Hud {
 
   const handLost = document.createElement('div');
   handLost.setAttribute('role', 'status');
-  handLost.textContent = "Can't see your hand";
+  handLost.textContent = HAND_LOST_TEXT;
   Object.assign(handLost.style, {
     position: 'fixed',
     left: '50%',
@@ -127,7 +132,8 @@ export function createHud(): Hud {
     font: `700 7vmin/1.2 ${FONT}`,
     textShadow: SHADOW,
     textAlign: 'center',
-    whiteSpace: 'nowrap',
+    width: 'max-content',
+    maxWidth: '90vw', // the Phone's message wraps on a narrow window
   });
 
   document.body.append(countdown, streak, match, feedback, handLost);
@@ -164,7 +170,8 @@ export function createHud(): Hud {
       clearTimeout(feedbackTimer);
       feedbackTimer = setTimeout(() => (feedback.style.opacity = '0'), FEEDBACK_MS);
     },
-    showHandLost(lost) {
+    showHandLost(lost, text = HAND_LOST_TEXT) {
+      if (handLost.textContent !== text) handLost.textContent = text;
       if (lost === shownHandLost) return;
       shownHandLost = lost;
       handLost.style.display = lost ? 'block' : 'none';

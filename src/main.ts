@@ -24,9 +24,14 @@
  * pairing QR code and room code until the Phone connects, the hand if not
  * saved, Zeroing, Timing calibration if the Phone has no Timing Offset, and
  * Continue once it is connected and Zeroed. Swings and the Paddle come from
- * the Phone Input; play waits while it isn't sending. If it disconnects
- * after setup, the pairing overlay shows again. In debug mode the Phone log
- * is recorded for fixtures (debug panel, Phone group).
+ * the Phone Input; play waits while it isn't sending. If it goes away after
+ * setup (its page locked, hid or reloaded: `phone/presence.ts`), play pauses
+ * the same way as a lost hand (`game/handPause.ts`), with "Phone
+ * disconnected: unlock your phone"; the Phone page rejoins the same room on
+ * its own, and play resumes after the usual wait and "3, 2, 1". Away for
+ * PHONE_PAIRING_AGAIN_MS, the pairing QR code shows again, in case its page
+ * was closed for good. In debug mode the Phone log is recorded for fixtures
+ * (debug panel, Phone group).
  *
  * Each Input reads and saves its own Timing Offset (`timingOffsetStore`).
  *
@@ -108,6 +113,8 @@ import { ClockSync } from './phone/clock.ts';
 import { mountLatencyOverlay } from './phone/latencyOverlay.ts';
 import type { LinkStatus } from './phone/types.ts';
 import { hapticFor } from './phone/haptics.ts';
+import { watchPhonePresence } from './phone/presence.ts';
+import { handPause, type HandPause } from './game/handPause.ts';
 
 const canvas = document.querySelector<HTMLCanvasElement>('#scene');
 if (!canvas) throw new Error('index.html must contain <canvas id="scene">');
@@ -156,12 +163,19 @@ const mouse: MouseInput | null =
 let phone: PhoneInput | null = null;
 /** The Phone's link, for pairing and setup. */
 let phoneLink: SignalingLink | null = null;
+/** Whether the paired Phone is away (its page locked, hid or reloaded), for the disconnect pause. */
+let phonePresence: { readonly away: boolean; readonly awayMs: number } | null = null;
+/** ms the Phone is away after setup before the pairing QR code shows again, in case its page was closed for good. */
+const PHONE_PAIRING_AGAIN_MS = 20_000;
+/** Show or hide the pairing QR code after setup; returns whether it shows. Called every frame. */
+let syncPairingAgain: () => boolean = () => false;
 
 function installPhone(): PhoneInput {
   const now = () => performance.now();
   const link = openLaptopLink({ signalUrl: signalUrl(), now });
   phoneLink = link;
-  // After setup: shown again whenever the Phone disconnects (onboarding pairs it the first time).
+  phonePresence = watchPhonePresence(link, now);
+  // After setup: shown again once the Phone has been away a while (onboarding pairs it the first time).
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(12,14,20,0.92);color:#e6e9ef;font-family:system-ui,sans-serif';
   document.body.append(overlay);
@@ -169,12 +183,13 @@ function installPhone(): PhoneInput {
   const hint = document.createElement('p');
   hint.textContent = 'Scan the code with your Phone and tap “Tap to start” on it. Then hold it like the handle of a bat and tap Zero.';
   overlay.append(hint);
-  const show = () => {
-    const connected = link.status() === 'connected' || link.status() === 'relay';
-    overlay.style.display = connected || !onboarded ? 'none' : 'flex';
+  let shown = true;
+  syncPairingAgain = () => {
+    const show = onboarded && phonePresence!.awayMs > PHONE_PAIRING_AGAIN_MS;
+    if (show !== shown) overlay.style.display = (shown = show) ? 'flex' : 'none';
+    return show;
   };
-  show();
-  link.onStatus(show);
+  syncPairingAgain();
   installPhoneLogDownload({ registry: knobs, link, recording: () => debug.active });
   // Phone time onto the laptop's clock (P3-d): one ClockSync per link, running while the Phone is connected.
   // Swings before its first full round use the provisional estimate (the best answer so far, within half a
@@ -248,14 +263,22 @@ async function calibrate(cancellable: boolean): Promise<boolean> {
   }
 }
 
-/** Whether the game must wait for the player's hand: never with the mouse; with the Phone, until it is Zeroed and sending. */
-const waitingForHand = (): boolean => (phone ? phone.latest === null : poseMode() && pose.tracking !== 'tracked');
 /**
- * Whether to show "Can't see your hand": once pose is running, until the wrist
- * is first seen and whenever it is lost, during play and calibration (whose
- * Swings also need the wrist tracked).
+ * Whether the game must wait for the player's hand, and the banner to show
+ * (during play and calibration, whose Swings also need the hand): never with
+ * the mouse; with the Camera, until the wrist is tracked ("Can't see your
+ * hand" once it is lost); with the Phone, until it is Zeroed and sending, and
+ * while it is away ("Phone disconnected: unlock your phone").
  */
-const handLost = (): boolean => poseMode() && pose.tracking === 'lost';
+const handSignal = (): HandPause =>
+  handPause(
+    phone
+      ? { input: 'phone', sending: phone.latest !== null, away: phonePresence!.away }
+      : poseMode()
+        ? { input: 'camera', tracking: pose.tracking }
+        : { input: 'mouse' },
+  );
+const waitingForHand = (): boolean => handSignal().waiting;
 
 /**
  * Whether the core is paused: no new Feed or Serve and no Swings outside play
@@ -647,7 +670,9 @@ function frame(now: number): void {
   core.setPaused(corePaused());
   // A Zeroing tapped mid-Rally waits for the Rally's end (a paused game has no Rally).
   phone?.setZeroHold(rallyOn && !corePaused());
-  hud.showHandLost((playing || calibrating) && handLost());
+  const banner = handSignal().banner;
+  const pairingAgain = syncPairingAgain(); // the QR code covers the banner's place
+  hud.showHandLost((playing || calibrating) && banner !== null && !pairingAgain, banner ?? undefined);
   core.frame({ nowMs: now, elapsedSeconds });
   hud.showCountdown(core.countdown);
   showMatchHud();

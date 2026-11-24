@@ -4,8 +4,10 @@
  * motion access from a "Tap to start" tap, then streams one motion packet per
  * `devicemotion` event over the lossy channel. It keeps the screen awake, is
  * one full-screen tap area that never scrolls or zooms, and shows the status,
- * the live sample rate and a reminder to grip firmly. A thin DOM wrapper over
- * `sensors.ts` and `link.ts`.
+ * the live sample rate and a reminder to grip firmly. Hidden, it leaves the
+ * room; shown again, or after its link drops, it rejoins the same room, which
+ * is also kept in `?room=` for a reload (P3-e §2, `rejoin.ts`). A thin DOM
+ * wrapper over `sensors.ts` and `link.ts`.
  */
 import './phonePage.css';
 import { answerPings } from './clock.ts';
@@ -14,6 +16,7 @@ import { openPhoneLink, statusLabel, type LinkError, type SignalingLink } from '
 import { createSensorSource } from './sensors.ts';
 import { vibrateFor } from './haptics.ts';
 import { isRoomCode, normalizeRoomCode } from './signalProtocol.ts';
+import { keepRejoining, rejoinDelayMs, urlWithRoom } from './rejoin.ts';
 
 const ERROR_TEXT: Record<LinkError, string> = {
   'bad-room': 'Room codes are 5 letters and digits.',
@@ -82,11 +85,18 @@ blockScrollAndZoom();
 
 function join(code: string) {
   link?.close();
+  cancelRejoin(); // after the close, whose 'disconnected' would schedule one
   errorEl.textContent = '';
   form.hidden = true;
   roomEl.textContent = code;
+  room = code;
+  history.replaceState(history.state, '', urlWithRoom(location.href, code)); // a reload joins the same room
   const l = openPhoneLink(code, { signalUrl: signalUrl(), now });
   link = l;
+  l.onStatus((s) => {
+    if (s === 'connected' || s === 'relay') rejoinAttempts = 0;
+    else if (s === 'disconnected' && l === link) scheduleRejoin();
+  });
   if (import.meta.env.DEV) Object.assign(window, { __phoneLink: l });
   const show = () => {
     statusEl.textContent = statusLabel(l.status());
@@ -98,6 +108,9 @@ function join(code: string) {
   l.onStatus(show);
   l.onError((e) => {
     errorEl.textContent = ERROR_TEXT[e];
+    if (keepRejoining(e)) return; // the rejoin already scheduled tries again
+    room = null;
+    cancelRejoin();
     form.hidden = false;
     input.value = code;
   });
@@ -110,6 +123,41 @@ function join(code: string) {
     receivedEl.textContent = `Received ${count} control message${count === 1 ? '' : 's'}, last: ${m.type}`;
   });
 }
+
+/**
+ * Coming back (P3-e §2, `rejoin.ts`): the room this page plays in, once
+ * joined. Hidden (the Phone locked, or another app came up), the page leaves
+ * it, so the laptop pauses at once; shown again, it joins the same room. A
+ * link that drops while the page shows rejoins after a growing wait.
+ */
+let room: string | null = null;
+let rejoinAttempts = 0;
+let rejoinTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelRejoin() {
+  if (rejoinTimer !== null) clearTimeout(rejoinTimer);
+  rejoinTimer = null;
+}
+
+function scheduleRejoin() {
+  if (room === null || rejoinTimer !== null || document.visibilityState !== 'visible') return;
+  const code = room;
+  rejoinTimer = setTimeout(() => {
+    rejoinTimer = null;
+    if (room === code && document.visibilityState === 'visible') join(code);
+  }, rejoinDelayMs(rejoinAttempts++));
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (room === null) return;
+  if (document.visibilityState === 'hidden') {
+    cancelRejoin();
+    link?.close();
+  } else if (link?.status() === 'disconnected') {
+    rejoinAttempts = 0;
+    join(room);
+  }
+});
 
 let startedAt: number | null = null;
 startBtn.onclick = async () => {

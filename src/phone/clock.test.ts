@@ -230,6 +230,34 @@ describe('ClockSync', () => {
     expect(Math.abs(sync.offsetMs() - base)).toBeLessThan(5);
   });
 
+  it('takes a reloaded Phone clock from the first answer, before the round finishes', () => {
+    let base = 1234.5;
+    const { sim, sync } = setup({ seed: 7, maxDelayMs: 30, phoneClock: (t) => t + base });
+    sync.start();
+    sim.runUntil(WARM_MS);
+    sync.stop(); // the Phone page went away
+    sim.runUntil(30_000);
+    base = -25_000; // and reloaded: its performance.now() starts again
+    sync.start();
+    sim.runUntil(30_061); // one round trip at most 60 ms; the round needs 20
+    expect(sync.isSynced()).toBe(false);
+    expect(Math.abs(sync.offsetMs() - base)).toBeLessThanOrEqual(15); // within half its round trip
+    sim.runUntil(45_000);
+    expect(sync.isSynced()).toBe(true);
+    expect(Math.abs(sync.offsetMs() - base)).toBeLessThan(5);
+  });
+
+  it('keeps blending normally when no answer disagrees sharply', () => {
+    const { sim, sync } = setup({ seed: 8, maxDelayMs: 30, phoneClock: (t) => t + 1234.5 });
+    sync.start();
+    sim.runUntil(WARM_MS);
+    sync.stop();
+    sync.start(); // a short drop with the same page: no start over
+    sim.runUntil(WARM_MS + 61);
+    expect(sync.isSynced()).toBe(true);
+    expect(Math.abs(sync.offsetMs() - 1234.5)).toBeLessThan(5);
+  });
+
   it('stops pinging on stop(), keeps its estimate, and carries on from it on start()', () => {
     const { sim, sync, laptopSent } = setup({ seed: 6, maxDelayMs: 30, phoneClock: (t) => t + 1234.5 });
     sync.start();

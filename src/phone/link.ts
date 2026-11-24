@@ -25,8 +25,13 @@
  * the room doesn't expire while the Phone plays peer to peer; that keeps
  * relay possible later. Only in relay does losing the socket disconnect.
  *
+ * The Phone coming back (P3-e §2): when its page locks, hides or reloads it
+ * leaves the room (`peer-left`) and later joins it again. The laptop keeps
+ * the room alive meanwhile (the keepalive carries on), makes a fresh offer
+ * when the Phone rejoins, or goes straight to relay if this room needed it.
+ *
  * A thin wrapper over `WebSocket` and `RTCPeerConnection`; checked end to end
- * by `e2e/pairing.spec.ts` and `e2e/relay.spec.ts`. ICE servers default to
+ * by `e2e/pairing.spec.ts`, `e2e/relay.spec.ts` and `e2e/rejoin.spec.ts`. ICE servers default to
  * none: on the same network host candidates are enough, and there is no TURN
  * (ADR 0004).
  */
@@ -88,7 +93,8 @@ export function openPhoneLink(room: string, opts: LinkOptions): SignalingLink {
 }
 
 type SignalData =
-  | { kind: 'description'; description: RTCSessionDescriptionInit }
+  /** `offer`: the laptop numbers its offers and the Phone's answer carries the number back. */
+  | { kind: 'description'; description: RTCSessionDescriptionInit; offer?: number }
   | { kind: 'candidate'; candidate: RTCIceCandidateInit }
   /** The sender switched to relay; the receiver follows. */
   | { kind: 'relay' };
@@ -124,6 +130,10 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   let peerPresent = false;
   /** Peer to peer gave up for this pairing; everything goes through the socket. */
   let relaying = false;
+  /** Laptop: this room has fallen back to relay before, so a Phone that rejoins it goes straight to relay. */
+  let relayedBefore = false;
+  /** Laptop: offers made so far; the latest is the only one whose answer counts. */
+  let offers = 0;
   let keepalive: ReturnType<typeof setInterval> | null = null;
   const pacer = createRelayPacer(RELAY_MOTION_HZ);
 
@@ -164,12 +174,26 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     keepalive = null;
   };
 
+  /**
+   * A closed connection's pending operations never settle (the WebRTC spec
+   * abandons them), which would stall the signal chain for good, e.g. an offer
+   * made as the channels closed, cut off by the Phone leaving. So each
+   * operation on a connection races its replacement: `live(p, op)` rejects
+   * with SUPERSEDED once this page tears `p` down.
+   */
+  const abandon = new WeakMap<RTCPeerConnection, { gone: Promise<never>; reject: () => void }>();
+  const live = <T>(p: RTCPeerConnection, op: Promise<T>): Promise<T> => {
+    const a = abandon.get(p);
+    return a ? Promise.race([op, a.gone]) : op;
+  };
+
   const teardownPeer = () => {
     const old = pc;
     pc = null;
     control = null;
     motion = null;
     pendingCandidates = [];
+    if (old) abandon.get(old)?.reject();
     old?.close();
   };
 
@@ -177,6 +201,7 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
   const startRelay = (tell: boolean) => {
     if (relaying || closed || !peerPresent) return;
     relaying = true;
+    relayedBefore = true;
     fallback.cancel();
     teardownPeer();
     if (tell) sendSignal({ kind: 'relay' });
@@ -235,6 +260,10 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     teardownPeer();
     const p = new RTCPeerConnection({ iceServers: opts.iceServers ?? [] });
     pc = p;
+    let reject!: () => void;
+    const gone = new Promise<never>((_, rej) => (reject = () => rej(new Error(SUPERSEDED))));
+    gone.catch(() => {});
+    abandon.set(p, { gone, reject });
     p.onicecandidate = (e) => {
       if (e.candidate && p === pc) sendSignal({ kind: 'candidate', candidate: e.candidate.toJSON() });
     };
@@ -252,25 +281,33 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
     attach(p, p.createDataChannel('control'));
     attach(p, p.createDataChannel('motion', { ordered: false, maxRetransmits: 0 }));
     setStatus('connecting');
-    await p.setLocalDescription(await p.createOffer());
-    if (p === pc && p.localDescription) sendSignal({ kind: 'description', description: p.localDescription.toJSON() });
+    const id = ++offers;
+    await live(p, p.setLocalDescription(await live(p, p.createOffer())));
+    if (p === pc && p.localDescription) sendSignal({ kind: 'description', description: p.localDescription.toJSON(), offer: id });
   };
+
+  /** A candidate meant for an earlier connection (a superseded offer) is refused by the current one; that's fine. */
+  const addCandidate = (p: RTCPeerConnection, c: RTCIceCandidateInit) => live(p, p.addIceCandidate(c)).catch(() => {});
 
   const onSignal = async (data: SignalData) => {
     if (data.kind === 'relay') return startRelay(false);
     if (relaying) return; // late offers, answers and candidates for a connection given up on
     if (data.kind === 'description') {
+      // Two offers can be in flight when the Phone rejoins as the channels close: take only the latest's answer.
+      if (isLaptop && (data.description.type !== 'answer' || data.offer !== offers)) return;
       // The Phone answers each offer with a fresh connection; the laptop takes the answer.
       const p = !isLaptop && data.description.type === 'offer' ? newPeer() : pc;
       if (!p) return;
-      await p.setRemoteDescription(data.description);
-      for (const c of pendingCandidates.splice(0)) await p.addIceCandidate(c);
+      await live(p, p.setRemoteDescription(data.description));
+      for (const c of pendingCandidates.splice(0)) await addCandidate(p, c);
       if (data.description.type === 'offer') {
-        await p.setLocalDescription(await p.createAnswer());
-        if (p === pc && p.localDescription) sendSignal({ kind: 'description', description: p.localDescription.toJSON() });
+        await live(p, p.setLocalDescription(await live(p, p.createAnswer())));
+        if (p === pc && p.localDescription) {
+          sendSignal({ kind: 'description', description: p.localDescription.toJSON(), offer: data.offer });
+        }
       }
     } else if (data.kind === 'candidate') {
-      if (pc?.remoteDescription) await pc.addIceCandidate(data.candidate);
+      if (pc?.remoteDescription) await addCandidate(pc, data.candidate);
       else pendingCandidates.push(data.candidate);
     }
   };
@@ -312,13 +349,16 @@ function openLink(joinRoom: string | null, opts: LinkOptions): SignalingLink {
         return;
       case 'peer-joined':
         peerArrived();
-        if (isLaptop) signalChain = signalChain.then(offer).catch(warn);
+        // A Phone back in a room that needed relay (its page locked or reloaded): the network hasn't changed, so skip the 5 s wait.
+        if (isLaptop && relayedBefore) startRelay(true);
+        else if (isLaptop) signalChain = signalChain.then(offer).catch(warn);
         return;
       case 'peer-left':
         peerPresent = false;
         relaying = false;
         fallback.cancel();
-        stopKeepalive();
+        // The laptop keeps the room alive while it waits for the Phone to come back (P3-e §2).
+        if (!isLaptop) stopKeepalive();
         teardownPeer();
         setStatus('disconnected');
         return;
@@ -393,7 +433,11 @@ function subscribe<T>(set: Set<T>, cb: T): () => void {
   return () => set.delete(cb);
 }
 
+/** Why an operation on a connection this page has since replaced was dropped: expected, not worth a warning. */
+const SUPERSEDED = 'connection replaced';
+
 function warn(e: unknown) {
+  if (e instanceof Error && e.message === SUPERSEDED) return;
   console.warn('PhoneLink signaling:', e);
 }
 
